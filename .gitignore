@@ -1,0 +1,8 @@
+.backups/
+**/.backups/
+.screenshots/
+**/.screenshots/
+node_modules/
+*.log
+*.tgz
+.DS_Store

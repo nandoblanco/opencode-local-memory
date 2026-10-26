@@ -1,0 +1,10 @@
+.backups/
+**/.backups/
+.screenshots/
+**/.screenshots/
+node_modules/
+test/
+*.log
+*.tgz
+.DS_Store
+tsconfig.json

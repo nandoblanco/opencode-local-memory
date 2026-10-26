@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 472" width="840" height="472" role="img" aria-label="opencode-local-memory TUI popup">
+  <defs>
+    <style>
+      .mono { font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace; font-size: 13px; }
+      .bold { font-weight: 700; }
+      .muted { fill: #8b8b93; }
+      .base { fill: #e6e6eb; }
+      .accent { fill: #ff9e64; }
+      .dark { fill: #141417; }
+    </style>
+  </defs>
+
+  <!-- Dialog Box -->
+  <rect x="1" y="1" width="838" height="470" rx="6" fill="#16161a" stroke="#2c2c34" stroke-width="1.5" />
+
+  <!-- 1. Header Bar -->
+  <text x="28" y="32" class="mono bold base">Local Memory Search</text>
+  <text x="196" y="32" class="mono muted">14 of 100 entries</text>
+  <text x="766" y="32" text-anchor="end" class="mono muted">~/.config/opencode/memory</text>
+  <text x="814" y="32" text-anchor="end" class="mono muted">esc</text>
+
+  <!-- 2. Search Input Row -->
+  <text x="28" y="64" class="mono bold accent">&#8250;</text>
+  <text x="44" y="64" class="mono base">self-contained topic:decisions</text>
+  <rect x="284" y="50" width="9" height="18" fill="#ff9e64" />
+
+  <!-- Filter Pills Bar -->
+  <rect x="28" y="80" width="108" height="22" rx="3" fill="#23232a" />
+  <text x="38" y="95" class="mono base">type:all <tspan class="muted">^t</tspan></text>
+
+  <rect x="146" y="80" width="160" height="22" rx="3" fill="#ff9e64" />
+  <text x="156" y="95" class="mono bold dark">topic:decisions ^g</text>
+
+  <rect x="316" y="80" width="130" height="22" rx="3" fill="#23232a" />
+  <text x="326" y="95" class="mono base">mode:hybrid <tspan class="muted">^r</tspan></text>
+
+  <line x1="1" y1="116" x2="839" y2="116" stroke="#2c2c34" stroke-width="1" />
+
+  <!-- 3. Split-Pane Body -->
+  <!-- Vertical Divider (44% left list / 56% right preview) -->
+  <line x1="370" y1="116" x2="370" y2="428" stroke="#2c2c34" stroke-width="1" />
+
+  <!-- Left Pane: Memory Entries -->
+  <!-- Selected Row 1 -->
+  <rect x="8" y="126" width="354" height="44" rx="3" fill="#ff9e64" />
+  <text x="18" y="145" class="mono bold dark">&#8250; [dec-016]</text>
+  <text x="352" y="145" text-anchor="end" class="mono dark">0.94 · decisions</text>
+  <text x="18" y="163" class="mono dark">  Self-contained context hook rules...</text>
+
+  <!-- Row 2 -->
+  <text x="18" y="193" class="mono base">  [dec-015]</text>
+  <text x="352" y="193" text-anchor="end" class="mono muted">0.78 · decisions</text>
+  <text x="18" y="211" class="mono muted">  Keep local-memory and session-search</text>
+
+  <!-- Row 3 -->
+  <text x="18" y="243" class="mono base">  [dec-013]</text>
+  <text x="352" y="243" text-anchor="end" class="mono muted">0.71 · decisions</text>
+  <text x="18" y="261" class="mono muted">  Migrate memory from CLI scripts...</text>
+
+  <!-- Row 4 -->
+  <text x="18" y="293" class="mono base">  [session:10-25_01]</text>
+  <text x="352" y="293" text-anchor="end" class="mono muted">0.68 · sessions</text>
+  <text x="18" y="311" class="mono muted">  Built opencode-local-memory plugin...</text>
+
+  <!-- Row 5 -->
+  <text x="18" y="343" class="mono base">  [tools-002]</text>
+  <text x="352" y="343" text-anchor="end" class="mono muted">0.64 · tools</text>
+  <text x="18" y="361" class="mono muted">  Zero-token TUI popup for /memory...</text>
+
+  <!-- Right Pane: Full Memory Entry Preview -->
+  <text x="392" y="144" class="mono bold base">[dec-016]</text>
+  <text x="392" y="166" class="mono muted">File: topics/decisions.md · Date: 2026-10-25</text>
+  <text x="392" y="188" class="mono muted">Score: 0.942 · Hybrid (semantic + keyword)</text>
+  <text x="392" y="208" class="mono muted">Tags: [opencode, plugin, local-memory, hooks]</text>
+
+  <text x="392" y="240" class="mono bold base">Memory Fact</text>
+
+  <line x1="394" y1="254" x2="394" y2="362" stroke="#ff9e64" stroke-width="2" />
+  <text x="406" y="268" class="mono bold accent">&#8250; [TOPICS/DECISIONS.MD] · enter to copy</text>
+  <text x="406" y="290" class="mono base">All persistent memory storage triggers, recall</text>
+  <text x="406" y="312" class="mono base">instructions, and checkpoint rules are injected</text>
+  <text x="406" y="334" class="mono base">by opencode-local-memory's context hook, making</text>
+  <text x="406" y="356" class="mono base">the plugin 100% <tspan class="bold accent">self-contained</tspan> for any user.</text>
+
+  <!-- 4. Footer Shortcut Bar -->
+  <line x1="1" y1="428" x2="839" y2="428" stroke="#2c2c34" stroke-width="1" />
+  <text x="28" y="454" class="mono muted">enter copy · ↑/↓ or ^n/^k select · ^t type · ^g topic · ^r mode · ^l sync · tab pane</text>
+  <text x="814" y="454" text-anchor="end" class="mono muted">0 tokens</text>
+</svg>
