@@ -220,4 +220,36 @@ describe("storeMemoryFact, storeSessionCheckpoint, syncVectors, and searchMemory
       }
     });
   });
+
+  it("sanitizes brackets/newlines in tags & IDs and preserves tuple entries in opencode.jsonc", async () => {
+    await withTempDir(async (tmpDir) => {
+      const memDir = path.join(tmpDir, "memory");
+      const cfgDir = path.join(tmpDir, "config");
+      fs.mkdirSync(cfgDir, { recursive: true });
+      const jsoncPath = path.join(cfgDir, "opencode.jsonc");
+      fs.writeFileSync(
+        jsoncPath,
+        '{\n  "plugins": [\n    ["existing-plugin", { "a": true }] // keep comment\n  ]\n}\n',
+        "utf8"
+      );
+
+      await installPlugin({ configDir: cfgDir, directory: memDir });
+      const rawJsonc = fs.readFileSync(jsoncPath, "utf8");
+      assert.ok(rawJsonc.includes('["existing-plugin", { "a": true }], // keep comment'));
+      assert.ok(rawJsonc.includes('["@nandoblanco/opencode-local-memory"'));
+
+      const stored = await storeMemoryFact(memDir, {
+        topic: "security",
+        id: "sec-[001]\ninjected",
+        tags: "tag1], [tag2\nnewline",
+        fact: "First line\nSecond line",
+      });
+      assert.equal(stored.id, "sec-001-injected");
+      const entries = parseTopicEntries(memDir);
+      assert.equal(entries.length, 1);
+      assert.equal(entries[0].id, "sec-001-injected");
+      assert.equal(entries[0].tags, "tag1, tag2 newline");
+      assert.equal(entries[0].fact, "First line Second line");
+    });
+  });
 });

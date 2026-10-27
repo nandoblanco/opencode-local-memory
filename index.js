@@ -10,6 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cliName = "open" + "code";
 
 let embedderPromise = null;
+let activeSyncPromise = null;
 let cachedEntries = null;
 let cachedRootDir = "";
 let cachedMtime = 0;
@@ -47,10 +48,106 @@ function resolveConfigDir(customConfigDir) {
     }
     return path.resolve(customConfigDir);
   }
+  if (process.env.OPENCODE_CONFIG_DIR) {
+    return path.resolve(process.env.OPENCODE_CONFIG_DIR);
+  }
   const configBase = process.env.XDG_CONFIG_HOME
     ? path.resolve(process.env.XDG_CONFIG_HOME)
     : path.join(os.homedir(), ".config");
   return path.join(configBase, cliName);
+}
+
+function findPluginsArraySpan(raw) {
+  const keyRe = /"plugins"\s*:\s*\[/g;
+  const match = keyRe.exec(raw);
+  if (!match) return null;
+  const openBracketIdx = match.index + match[0].length - 1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = openBracketIdx; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === "/" && raw[i + 1] === "/") {
+      const nl = raw.indexOf("\n", i + 2);
+      if (nl === -1) break;
+      i = nl;
+      continue;
+    }
+    if (ch === "/" && raw[i + 1] === "*") {
+      const endComment = raw.indexOf("*/", i + 2);
+      if (endComment === -1) break;
+      i = endComment + 1;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "[") depth++;
+    else if (ch === "]") {
+      depth--;
+      if (depth === 0) {
+        return {
+          start: match.index,
+          openEnd: openBracketIdx + 1,
+          closeStart: i,
+          end: i + 1
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function findLastCodeCharIndex(str) {
+  let lastIdx = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (inString) {
+      lastIdx = i;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === "/" && str[i + 1] === "/") {
+      const nl = str.indexOf("\n", i + 2);
+      if (nl === -1) break;
+      i = nl;
+      continue;
+    }
+    if (ch === "/" && str[i + 1] === "*") {
+      const endComment = str.indexOf("*/", i + 2);
+      if (endComment === -1) break;
+      i = endComment + 1;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      lastIdx = i;
+      continue;
+    }
+    if (!/\s/.test(ch)) {
+      lastIdx = i;
+    }
+  }
+  return lastIdx;
 }
 
 function addPluginToJsoncFile(filePath, schemaUrl, pluginEntryStr, pkgName) {
@@ -73,28 +170,39 @@ function addPluginToJsoncFile(filePath, schemaUrl, pluginEntryStr, pkgName) {
     return "already-present";
   }
 
-  const pluginsArrRe = /("plugins"\s*:\s*\[)([\s\S]*?)(\])/;
-  const match = raw.match(pluginsArrRe);
-  if (match) {
-    const inner = match[2].trim();
-    const updated = raw.replace(pluginsArrRe, function (_, open, body, close) {
-      if (!inner) {
-        return open + "\n    " + pluginEntryStr + "\n  " + close;
-      }
-      const trimmedBody = body.replace(/\s*$/, "");
-      const needsComma = !trimmedBody.endsWith(",");
-      return open + trimmedBody + (needsComma ? "," : "") + "\n    " + pluginEntryStr + "\n  " + close;
-    });
+  const span = findPluginsArraySpan(raw);
+  if (span) {
+    const open = raw.slice(span.start, span.openEnd);
+    const body = raw.slice(span.openEnd, span.closeStart);
+    const close = raw.slice(span.closeStart, span.end);
+    const lastCodeIdx = findLastCodeCharIndex(body);
+    let replacement;
+    if (lastCodeIdx === -1) {
+      replacement = open + "\n    " + pluginEntryStr + "\n  " + close;
+    } else {
+      const needsComma = body[lastCodeIdx] !== ",";
+      const withComma = needsComma
+        ? body.slice(0, lastCodeIdx + 1) + "," + body.slice(lastCodeIdx + 1)
+        : body;
+      const trimmedBody = withComma.replace(/\s*$/, "");
+      replacement = open + trimmedBody + "\n    " + pluginEntryStr + "\n  " + close;
+    }
+    const updated = raw.slice(0, span.start) + replacement + raw.slice(span.end);
     fs.writeFileSync(filePath, updated, "utf8");
     return "updated";
   }
 
   const lastBrace = raw.lastIndexOf("}");
   if (lastBrace !== -1) {
-    const before = raw.slice(0, lastBrace).replace(/\s*$/, "");
-    const trimmedObj = before.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "").trim();
-    const needsComma = trimmedObj.length > 1 && !trimmedObj.endsWith("{") && !trimmedObj.endsWith(",");
-    const updated = before + (needsComma ? "," : "") + '\n  "plugins": [\n    ' + pluginEntryStr + "\n  ]\n}\n";
+    const beforeSlice = raw.slice(0, lastBrace);
+    const lastCodeIdx = findLastCodeCharIndex(beforeSlice);
+    const lastChar = lastCodeIdx !== -1 ? beforeSlice[lastCodeIdx] : "{";
+    const needsComma = lastChar !== "{" && lastChar !== ",";
+    const withComma = (needsComma && lastCodeIdx !== -1)
+      ? beforeSlice.slice(0, lastCodeIdx + 1) + "," + beforeSlice.slice(lastCodeIdx + 1)
+      : beforeSlice;
+    const before = withComma.replace(/\s*$/, "");
+    const updated = before + '\n  "plugins": [\n    ' + pluginEntryStr + "\n  ]\n}\n";
     fs.writeFileSync(filePath, updated, "utf8");
     return "updated";
   }
@@ -119,9 +227,11 @@ async function installPlugin(options) {
   const cliConfigFile = path.join(configDir, "cli.json");
 
   const serverEntryStr = opts.directory
-    ? JSON.stringify({ package: pkgName, options: { directory: opts.directory } })
+    ? JSON.stringify([pkgName, { directory: opts.directory }])
     : JSON.stringify(pkgName);
-  const cliEntryStr = JSON.stringify(pkgName);
+  const cliEntryStr = opts.directory
+    ? JSON.stringify([pkgName, { directory: opts.directory }])
+    : JSON.stringify(pkgName);
 
   const serverStatus = addPluginToJsoncFile(serverConfigFile, "https://" + cliName + ".ai/config.json", serverEntryStr, matchKey);
   const cliStatus = addPluginToJsoncFile(cliConfigFile, "https://" + cliName + ".ai/v2/cli.json", cliEntryStr, matchKey);
@@ -201,7 +311,10 @@ async function getEmbedder() {
       pipelineFn = mod.pipeline;
     }
     return pipelineFn("feature-extraction", "Xenova/all-MiniLM-L6-v2");
-  })();
+  })().catch(function (err) {
+    embedderPromise = null;
+    throw err;
+  });
   return embedderPromise;
 }
 
@@ -212,7 +325,16 @@ async function embedText(text) {
   }
   const embed = await getEmbedder();
   const out = await embed(text, { pooling: "mean", normalize: true });
-  const vec = Array.from(out.data);
+  const vec = Array.from(out.data, function (v) {
+    return Math.round(v * 1e6) / 1e6;
+  });
+  if (out && typeof out.dispose === "function") {
+    try {
+      out.dispose();
+    } catch {
+      // ignore dispose errors
+    }
+  }
   if (queryVecCache.size >= 128) {
     const firstKey = queryVecCache.keys().next().value;
     queryVecCache.delete(firstKey);
@@ -298,7 +420,32 @@ function parseSessionEntries(rootDir) {
   return entries;
 }
 
-async function syncVectors(rootDir) {
+function serializeVectorsJson(entries) {
+  if (!entries || entries.length === 0) return "[]\n";
+  const lines = entries.map(function (e) {
+    return "  " + JSON.stringify({
+      id: e.id,
+      date: e.date,
+      file: e.file,
+      tags: e.tags,
+      fact: e.fact,
+      vector: e.vector
+    });
+  });
+  return "[\n" + lines.join(",\n") + "\n]\n";
+}
+
+function prepareEntryCacheFields(item) {
+  if (!item) return;
+  if (!item._haystack) {
+    item._haystack = (item.id + " " + item.tags + " " + item.fact + " " + item.file).toLowerCase();
+  }
+  if (Array.isArray(item.vector) && !(item._vec instanceof Float32Array)) {
+    item._vec = new Float32Array(item.vector);
+  }
+}
+
+async function runSyncVectors(rootDir) {
   ensureMemoryLayout(rootDir);
   const vecFile = path.join(rootDir, "vectors.json");
   const existingMap = new Map();
@@ -329,16 +476,14 @@ async function syncVectors(rootDir) {
       entry.vector = await embedText(entry.fact + " " + entry.tags);
       embeddedCount++;
     }
+    prepareEntryCacheFields(entry);
   }
 
   const changed = embeddedCount > 0 || parsed.length !== existingMap.size;
   if (changed || !fs.existsSync(vecFile)) {
-    fs.writeFileSync(vecFile, JSON.stringify(parsed, null, 1), "utf8");
+    fs.writeFileSync(vecFile, serializeVectorsJson(parsed), "utf8");
   }
 
-  for (const item of parsed) {
-    item._haystack = (item.id + " " + item.tags + " " + item.fact + " " + item.file).toLowerCase();
-  }
   cachedEntries = parsed;
   cachedRootDir = path.resolve(rootDir);
   cachedMtime = fs.existsSync(vecFile) ? fs.statSync(vecFile).mtimeMs : Date.now();
@@ -348,19 +493,40 @@ async function syncVectors(rootDir) {
   return { total: parsed.length, embedded: embeddedCount, reused: reusedCount, vecFile: vecFile };
 }
 
+async function syncVectors(rootDir) {
+  if (activeSyncPromise) {
+    try {
+      await activeSyncPromise;
+    } catch {
+      // Proceed with fresh sync
+    }
+  }
+  const p = runSyncVectors(rootDir);
+  activeSyncPromise = p;
+  try {
+    return await p;
+  } finally {
+    if (activeSyncPromise === p) {
+      activeSyncPromise = null;
+    }
+  }
+}
+
 function loadCachedVectors(rootDir) {
   const resolved = path.resolve(rootDir);
   const vecFile = path.join(resolved, "vectors.json");
-  if (!fs.existsSync(vecFile)) return [];
-  const stat = fs.statSync(vecFile);
+  let stat;
+  try {
+    stat = fs.statSync(vecFile);
+  } catch {
+    return [];
+  }
   if (cachedEntries && cachedRootDir === resolved && cachedMtime === stat.mtimeMs) {
     return cachedEntries;
   }
   const parsed = JSON.parse(fs.readFileSync(vecFile, "utf8"));
   for (const item of parsed) {
-    if (item && !item._haystack) {
-      item._haystack = (item.id + " " + item.tags + " " + item.fact + " " + item.file).toLowerCase();
-    }
+    prepareEntryCacheFields(item);
   }
   cachedEntries = parsed;
   cachedRootDir = resolved;
@@ -406,13 +572,14 @@ async function searchMemory(rootDir, query, mode, topN) {
 
   let queryVec = null;
   if (searchMode === "semantic" || searchMode === "hybrid") {
-    queryVec = await embedText(cleanQuery);
+    const rawQueryVec = await embedText(cleanQuery);
+    queryVec = rawQueryVec instanceof Float32Array ? rawQueryVec : new Float32Array(rawQueryVec);
   }
 
   for (const entry of entries) {
     let semanticScore = 0;
-    if (queryVec && Array.isArray(entry.vector)) {
-      semanticScore = dotProduct(queryVec, entry.vector);
+    if (queryVec && (entry._vec || Array.isArray(entry.vector))) {
+      semanticScore = dotProduct(queryVec, entry._vec || entry.vector);
     }
 
     let lexicalScore = 0;
@@ -455,6 +622,13 @@ function nextTopicId(topicText, topicSlug) {
 }
 
 async function storeMemoryFact(rootDir, input) {
+  if (activeSyncPromise) {
+    try {
+      await activeSyncPromise;
+    } catch {
+      // Ignore background sync error
+    }
+  }
   ensureMemoryLayout(rootDir);
   const rawTopic = String(input.topic || "decisions").toLowerCase().replace(/[^a-z0-9-_]/g, "-");
   const topicFile = path.join(rootDir, "topics", rawTopic + ".md");
@@ -475,11 +649,15 @@ async function storeMemoryFact(rootDir, input) {
     }
   }
 
-  const id = input.id ? String(input.id).trim() : nextTopicId(existingText, rawTopic);
+  const rawId = input.id
+    ? String(input.id).replace(/[\[\]]+/g, "").replace(/[\r\n\s]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "")
+    : "";
+  const id = rawId || nextTopicId(existingText, rawTopic);
   const today = new Date().toISOString().split("T")[0];
-  const tagsList = Array.isArray(input.tags)
+  const rawTags = Array.isArray(input.tags)
     ? input.tags.map(function (t) { return String(t).trim(); }).filter(Boolean).join(", ")
     : String(input.tags || rawTopic).trim();
+  const tagsList = rawTags.replace(/[\[\]]+/g, "").replace(/[\r\n\s]+/g, " ").trim() || rawTopic;
   const cleanFact = String(input.fact || "").replace(/\s+/g, " ").trim();
 
   const block = [
@@ -504,12 +682,9 @@ async function storeMemoryFact(rootDir, input) {
     fact: cleanFact,
     vector: vec
   };
+  prepareEntryCacheFields(newEntry);
   entries.push(newEntry);
-  const serializable = entries.map(function (e) {
-    return { id: e.id, date: e.date, file: e.file, tags: e.tags, fact: e.fact, vector: e.vector };
-  });
-  fs.writeFileSync(vecFile, JSON.stringify(serializable, null, 1), "utf8");
-  newEntry._haystack = (newEntry.id + " " + newEntry.tags + " " + newEntry.fact + " " + newEntry.file).toLowerCase();
+  fs.writeFileSync(vecFile, serializeVectorsJson(entries), "utf8");
   cachedEntries = entries;
   cachedRootDir = path.resolve(rootDir);
   cachedMtime = fs.statSync(vecFile).mtimeMs;
@@ -599,7 +774,6 @@ function createPluginDefinition() {
       const topK = Number(options.topK || 6);
 
       loadCachedVectors(rootDir);
-      getEmbedder().catch(function () {});
       syncVectors(rootDir).catch(function (err) {
         console.error("local-memory sync error:", err);
       });

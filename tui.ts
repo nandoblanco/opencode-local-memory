@@ -61,36 +61,60 @@ function splitHighlightedText(
   if (!term || !term.trim()) {
     return [{ text, match: false }];
   }
-  const firstWord =
-    term
-      .trim()
-      .toLowerCase()
-      .split(/\s+/)
-      .find((w) => w.length >= 2 && !w.includes(":")) || term.trim().toLowerCase();
-  if (!firstWord) return [{ text, match: false }];
+  const words = term
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length >= 2 && !w.includes(":"));
+  if (!words.length) {
+    const fallback = term.trim().toLowerCase();
+    if (fallback && !fallback.includes(":")) words.push(fallback);
+  }
+  if (!words.length) return [{ text, match: false }];
 
   const parts: Array<{ text: string; match: boolean }> = [];
   const lower = text.toLowerCase();
   let cursor = 0;
 
   while (cursor < text.length) {
-    const idx = lower.indexOf(firstWord, cursor);
-    if (idx === -1) {
+    let bestIdx = -1;
+    let bestLen = 0;
+    for (const w of words) {
+      const idx = lower.indexOf(w, cursor);
+      if (idx !== -1 && (bestIdx === -1 || idx < bestIdx || (idx === bestIdx && w.length > bestLen))) {
+        bestIdx = idx;
+        bestLen = w.length;
+      }
+    }
+    if (bestIdx === -1) {
       parts.push({ text: text.slice(cursor), match: false });
       break;
     }
-    if (idx > cursor) {
-      parts.push({ text: text.slice(cursor, idx), match: false });
+    if (bestIdx > cursor) {
+      parts.push({ text: text.slice(cursor, bestIdx), match: false });
     }
-    parts.push({ text: text.slice(idx, idx + firstWord.length), match: true });
-    cursor = idx + firstWord.length;
+    parts.push({ text: text.slice(bestIdx, bestIdx + bestLen), match: true });
+    cursor = bestIdx + bestLen;
   }
   return parts.length ? parts : [{ text, match: false }];
 }
 
+function isSafeSubPath(parentDir: string, targetPath: string): boolean {
+  const rel = path.relative(path.resolve(parentDir), path.resolve(targetPath));
+  return Boolean(rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function isSafeRegexPattern(pattern: string): boolean {
+  if (!pattern || pattern.length > 256) return false;
+  // Reject nested quantifiers such as (a+)+, (.*)*, ([a-z]+){2,} that cause catastrophic backtracking
+  if (/(\([^()]*[+*?][^()]*\))\s*[+*?{]/.test(pattern)) return false;
+  return true;
+}
+
 function readFullSessionMarkdown(rootDir: string, relFile: string): string {
   try {
-    const fullPath = path.join(rootDir, relFile);
+    const fullPath = path.resolve(rootDir, relFile);
+    if (!isSafeSubPath(rootDir, fullPath)) return "";
     if (fs.existsSync(fullPath)) {
       return fs.readFileSync(fullPath, "utf8").replace(/\r\n/g, "\n").trim();
     }
@@ -107,7 +131,7 @@ interface DialogProps {
   close: () => void;
 }
 
-async function loadTuiRenderer() {
+function createTuiRenderer() {
   function el(
     tag: string,
     props?: Record<string, unknown> | null,
@@ -287,10 +311,11 @@ async function loadTuiRenderer() {
         try {
           const lastSlash = q.startsWith("/") ? q.lastIndexOf("/") : -1;
           const pattern = lastSlash > 0 ? q.slice(1, lastSlash) : q;
+          if (!isSafeRegexPattern(pattern)) return [];
           const flags = lastSlash > 0 ? q.slice(lastSlash + 1) || "i" : "i";
           const re = new RegExp(pattern, flags);
           return subset
-            .filter((e) => re.test(`${e.id} ${e.tags} ${e.fact} ${e.file}`))
+            .filter((e) => re.test(e._haystack || `${e.id} ${e.tags} ${e.fact} ${e.file}`))
             .map((e) => ({ score: 1, semanticScore: 0, entry: e }));
         } catch {
           return [];
@@ -493,22 +518,30 @@ async function loadTuiRenderer() {
 
       if (
         name === "down" ||
-        (event.ctrl && name === "n") ||
-        (focusPane() === "list" && !event.ctrl && name === "j")
+        (event.ctrl && (name === "n" || name === "j")) ||
+        (focusPane() !== "input" && !event.ctrl && name === "j")
       ) {
         event.preventDefault();
         event.stopPropagation();
-        moveSelection(1);
+        if (focusPane() === "preview" && !event.ctrl && name === "j") {
+          previewScrollRef?.scrollBy?.(2);
+        } else {
+          moveSelection(1);
+        }
         return;
       }
       if (
         name === "up" ||
-        (event.ctrl && name === "k") ||
-        (focusPane() === "list" && !event.ctrl && name === "k")
+        (event.ctrl && (name === "p" || name === "k")) ||
+        (focusPane() !== "input" && !event.ctrl && name === "k")
       ) {
         event.preventDefault();
         event.stopPropagation();
-        moveSelection(-1);
+        if (focusPane() === "preview" && !event.ctrl && name === "k") {
+          previewScrollRef?.scrollBy?.(-2);
+        } else {
+          moveSelection(-1);
+        }
         return;
       }
       if (name === "pagedown" || (event.ctrl && name === "d")) {
@@ -1016,15 +1049,10 @@ export default {
       return;
     }
     const rootDir = resolveMemoryDir((context as any)?.options?.directory);
-    const renderDialogPromise = loadTuiRenderer().catch(() => null);
+    const renderDialog = createTuiRenderer();
 
     const openMemoryPopup = async (rawArgs?: string) => {
       const initialQuery = typeof rawArgs === "string" ? rawArgs.trim() : "";
-      const renderDialog = await renderDialogPromise;
-      if (!renderDialog) {
-        await openFallbackSelectDialog(context, rootDir, initialQuery);
-        return;
-      }
 
       try {
         context.ui.dialog.show(() =>
@@ -1074,46 +1102,50 @@ export default {
       }
     };
 
+    let layerRegistered = false;
     context.ui.slot({
       append: "app",
       render() {
-        context.keymap.layer(() => ({
-          mode: "global",
-          commands: [
-            {
-              id: "local.memory.search",
-              title: "Search local memory (0 tokens)...",
-              description:
-                "Interactive zero-token popup to search local memories (topics/*.md + sessions/*.md) with semantic + keyword + regex matching",
-              category: "Memory",
-              palette: true,
-              slash: {
-                name: "memory",
-                arguments: true,
+        if (!layerRegistered) {
+          layerRegistered = true;
+          context.keymap.layer(() => ({
+            mode: "global",
+            commands: [
+              {
+                id: "local.memory.search",
+                title: "Search local memory (0 tokens)...",
+                description:
+                  "Interactive zero-token popup to search local memories (topics/*.md + sessions/*.md) with semantic + keyword + regex matching",
+                category: "Memory",
+                palette: true,
+                slash: {
+                  name: "memory",
+                  arguments: true,
+                },
+                run: (input) => {
+                  const rawArgs = typeof input === "string" ? input : (input as any)?.arguments;
+                  void openMemoryPopup(rawArgs);
+                },
               },
-              run: (input) => {
-                const rawArgs = typeof input === "string" ? input : (input as any)?.arguments;
-                void openMemoryPopup(rawArgs);
+              {
+                id: "local.memory.add",
+                title: "Store local memory fact (0 tokens)...",
+                description:
+                  "Zero-token slash command to store a memory fact directly: /memory-add <topic> | <tags> | <fact>",
+                category: "Memory",
+                palette: false,
+                slash: {
+                  name: "memory-add",
+                  arguments: true,
+                },
+                run: (input) => {
+                  const rawArgs = typeof input === "string" ? input : (input as any)?.arguments;
+                  void quickStoreFromSlash(rawArgs);
+                },
               },
-            },
-            {
-              id: "local.memory.add",
-              title: "Store local memory fact (0 tokens)...",
-              description:
-                "Zero-token slash command to store a memory fact directly: /memory-add <topic> | <tags> | <fact>",
-              category: "Memory",
-              palette: false,
-              slash: {
-                name: "memory-add",
-                arguments: true,
-              },
-              run: (input) => {
-                const rawArgs = typeof input === "string" ? input : (input as any)?.arguments;
-                void quickStoreFromSlash(rawArgs);
-              },
-            },
-          ],
-        }));
+            ],
+          }));
+        }
         return null;
       },
     });
