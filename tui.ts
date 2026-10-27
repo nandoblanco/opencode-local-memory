@@ -2,6 +2,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type { TuiPluginContext } from "@opencode-ai/plugin/tui";
 import { TextAttributes } from "@opentui/core";
 import {
@@ -24,8 +26,11 @@ import {
   Show,
 } from "solid-js";
 import {
+  deleteMemoryEntry,
   getTopicSlugs,
+  importExistingMemory,
   loadCachedVectors,
+  matchesProjectScope,
   resolveMemoryDir,
   searchMemory,
   storeMemoryFact,
@@ -38,6 +43,8 @@ interface MemoryEntry {
   file: string;
   tags: string;
   fact: string;
+  project?: string;
+  core?: boolean;
   vector?: number[];
   _haystack?: string;
 }
@@ -53,6 +60,43 @@ type ModeFilter = "hybrid" | "keyword" | "regex";
 
 const TYPE_CYCLE: TypeFilter[] = ["all", "topics", "sessions"];
 const MODE_CYCLE: ModeFilter[] = ["hybrid", "keyword", "regex"];
+const CLI_SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "index.js");
+
+function runCliSubprocess(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const baseEnv = { ...process.env, OPENCODE_MEMORY_SUBPROCESS: "1" };
+    execFile("node", [CLI_SCRIPT_PATH, ...args], { env: baseEnv, windowsHide: true, timeout: 120000 }, (err, stdout) => {
+      if (!err) return resolve(String(stdout || ""));
+      const bunEnv = { ...baseEnv, BUN_BE_BUN: "1" };
+      execFile(process.execPath, [CLI_SCRIPT_PATH, ...args], { env: bunEnv, windowsHide: true, timeout: 120000 }, (err2, stdout2) => {
+        if (err2) return reject(err);
+        resolve(String(stdout2 || ""));
+      });
+    });
+  });
+}
+
+async function safeSyncVectors(rootDir: string) {
+  try {
+    return await syncVectors(rootDir);
+  } catch {
+    await runCliSubprocess(["sync", "--dir", rootDir]);
+    const loaded = (loadCachedVectors(rootDir) || []) as MemoryEntry[];
+    return { total: loaded.length, embedded: 0, reused: loaded.length, vecFile: path.join(rootDir, "vectors.json") };
+  }
+}
+
+async function safeImportMemory(rootDir: string, limit?: number) {
+  try {
+    return await importExistingMemory(rootDir, { limit });
+  } catch {
+    const args = ["import", "--dir", rootDir, "--json"];
+    if (limit) args.push("--limit", String(limit));
+    const stdout = await runCliSubprocess(args);
+    const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+}
 
 function splitHighlightedText(
   text: string,
@@ -249,6 +293,8 @@ function createTuiRenderer() {
       let effType = tFilter;
       let effTopic = topFilter;
       let effMode = mFilter;
+      let effProject = "all";
+      let effCoreOnly = false;
       const tokens = rawQ.trim().split(/\s+/).filter(Boolean);
       const cleanTokens: string[] = [];
 
@@ -260,6 +306,11 @@ function createTuiRenderer() {
           effType = "sessions";
         } else if (lower === "type:all") {
           effType = "all";
+        } else if (lower === "core:true" || lower === "is:core") {
+          effCoreOnly = true;
+        } else if (lower.startsWith("project:")) {
+          const val = lower.slice(8).trim();
+          if (val) effProject = val;
         } else if (lower.startsWith("topic:")) {
           const val = lower.slice(6).trim();
           if (val) effTopic = val;
@@ -276,6 +327,8 @@ function createTuiRenderer() {
         effType,
         effTopic,
         effMode,
+        effProject,
+        effCoreOnly,
       };
     };
 
@@ -286,7 +339,7 @@ function createTuiRenderer() {
       topFilter: string,
       mFilter: ModeFilter
     ): MemoryHit[] => {
-      const { cleanQ: q, effType, effTopic, effMode } = parseInlineFilters(
+      const { cleanQ: q, effType, effTopic, effMode, effProject, effCoreOnly } = parseInlineFilters(
         rawQ,
         tFilter,
         topFilter,
@@ -297,6 +350,8 @@ function createTuiRenderer() {
         if (effType === "topics" && !e.file.startsWith("topics/")) return false;
         if (effType === "sessions" && !e.file.startsWith("sessions/")) return false;
         if (effTopic !== "all" && e.file !== `topics/${effTopic}.md`) return false;
+        if (effCoreOnly && !e.core) return false;
+        if (effProject !== "all" && !matchesProjectScope(e.project, effProject, false)) return false;
         return true;
       });
 
@@ -356,7 +411,7 @@ function createTuiRenderer() {
       const tFilter = typeFilter();
       const topFilter = topicFilter();
       const mFilter = mode();
-      const { cleanQ: q, effType, effTopic, effMode } = parseInlineFilters(
+      const { cleanQ: q, effType, effTopic, effMode, effProject, effCoreOnly } = parseInlineFilters(
         rawQ,
         tFilter,
         topFilter,
@@ -370,7 +425,11 @@ function createTuiRenderer() {
       // If hybrid mode and non-empty query, refine with local vector similarity (0 LLM tokens)
       if (effMode === "hybrid" && q.length >= 2) {
         try {
-          const semHits: MemoryHit[] = await searchMemory(props.rootDir, q, "hybrid", 50);
+          const semHits: MemoryHit[] = await searchMemory(props.rootDir, q, "hybrid", 50, {
+            project: effProject,
+            includeGlobal: effProject === "all",
+            coreOnly: effCoreOnly,
+          });
           if (currentSeq !== searchSeq) return;
           const filtered = semHits.filter((h) => {
             if (effType === "topics" && !h.entry.file.startsWith("topics/")) return false;
@@ -388,12 +447,35 @@ function createTuiRenderer() {
     const reloadVectors = async (forceSync = false) => {
       if (forceSync) {
         setStatusMsg("syncing markdown -> vectors.json...");
-        await syncVectors(props.rootDir).catch(() => {});
+        await safeSyncVectors(props.rootDir).catch(() => {});
         setStatusMsg("");
       }
       const loaded = (loadCachedVectors(props.rootDir) || []) as MemoryEntry[];
       setAllEntries(loaded);
       await runSearch();
+    };
+
+    const runImportInDialog = async () => {
+      setStatusMsg("importing AGENTS.md & opencode.db...");
+      try {
+        const res = await safeImportMemory(props.rootDir);
+        setStatusMsg("");
+        const loaded = (loadCachedVectors(props.rootDir) || []) as MemoryEntry[];
+        setAllEntries(loaded);
+        await runSearch();
+        props.context.ui.toast.show({
+          title: "Memory Import Complete (0 tokens)",
+          message: `Imported ${res.importedFacts.length} rules & ${res.importedSessions.length} sessions (${res.syncResult.total} total)`,
+          variant: "success",
+        });
+      } catch (err) {
+        setStatusMsg("");
+        props.context.ui.toast.show({
+          title: "Memory Import Error",
+          message: err instanceof Error ? err.message : String(err),
+          variant: "error",
+        });
+      }
     };
 
     createEffect(() => {
@@ -486,6 +568,12 @@ function createTuiRenderer() {
         event.preventDefault();
         event.stopPropagation();
         void reloadVectors(true);
+        return;
+      }
+      if (event.ctrl && name === "b") {
+        event.preventDefault();
+        event.stopPropagation();
+        void runImportInDialog();
         return;
       }
 
@@ -742,6 +830,12 @@ function createTuiRenderer() {
             shortcut: "^r",
             active: () => mode() !== "hybrid",
             onClick: cycleMode,
+          }),
+          Pill({
+            label: () => "import",
+            shortcut: "^b",
+            active: () => false,
+            onClick: () => void runImportInDialog(),
           })
         )
       ),
@@ -903,7 +997,9 @@ function createTuiRenderer() {
                   () => {
                     const h = selectedHit();
                     if (!h) return "";
-                    return `File: ${h.entry.file} · Date: ${h.entry.date || "N/A"} · Score: ${h.score.toFixed(3)}`;
+                    const scope = h.entry.project || "global";
+                    const coreLabel = h.entry.core ? " · Core: pinned" : "";
+                    return `File: ${h.entry.file} · Date: ${h.entry.date || "N/A"} · Scope: ${scope}${coreLabel} · Score: ${h.score.toFixed(3)}`;
                   }
                 ),
                 el(
@@ -991,7 +1087,7 @@ function createTuiRenderer() {
         el(
           "text",
           { fg: () => theme().text.muted },
-          "enter select · ↑/↓ or ^n/^k move · ^t type · ^g topic · ^r mode · ^l resync · tab pane · esc"
+          "enter select · ↑/↓ or ^n/^k move · ^t type · ^g topic · ^r mode · ^b import · ^l resync · tab pane · esc"
         ),
         el(
           "text",
@@ -1102,6 +1198,64 @@ export default {
       }
     };
 
+    const quickDeleteFromSlash = async (rawArgs?: string) => {
+      const id = typeof rawArgs === "string" ? rawArgs.trim() : "";
+      if (!id) {
+        context.ui.toast.show({
+          title: "Local Memory Delete (0 tokens)",
+          message: "Usage: /memory-delete <id>",
+          variant: "warning",
+        });
+        return;
+      }
+      try {
+        const res = await deleteMemoryEntry(rootDir, id);
+        if (res.deleted.length === 0) {
+          context.ui.toast.show({
+            title: "Not Found",
+            message: `No memory entry matched ID: ${id}`,
+            variant: "warning",
+          });
+          return;
+        }
+        context.ui.toast.show({
+          title: `Deleted ${res.deleted.map((d: { id: string }) => `[${d.id}]`).join(", ")} (0 tokens)`,
+          message: `${res.total} entries remaining in vectors.json`,
+          variant: "success",
+        });
+      } catch (err) {
+        context.ui.toast.show({
+          title: "Local Memory Error",
+          message: err instanceof Error ? err.message : String(err),
+          variant: "error",
+        });
+      }
+    };
+
+    const quickImportFromSlash = async (rawArgs?: string) => {
+      const arg = typeof rawArgs === "string" ? rawArgs.trim() : "";
+      const limit = arg && /^\d+$/.test(arg) ? parseInt(arg, 10) : undefined;
+      context.ui.toast.show({
+        title: "Importing Local Memory (0 tokens)...",
+        message: "Scanning AGENTS.md rules and opencode.db session history...",
+        variant: "info",
+      });
+      try {
+        const res = await safeImportMemory(rootDir, limit);
+        context.ui.toast.show({
+          title: "Local Memory Import Complete (0 tokens)",
+          message: `Added ${res.importedFacts.length} rules & ${res.importedSessions.length} sessions (${res.syncResult.total} total indexed)`,
+          variant: "success",
+        });
+      } catch (err) {
+        context.ui.toast.show({
+          title: "Local Memory Import Error",
+          message: err instanceof Error ? err.message : String(err),
+          variant: "error",
+        });
+      }
+    };
+
     let layerRegistered = false;
     context.ui.slot({
       append: "app",
@@ -1141,6 +1295,38 @@ export default {
                 run: (input) => {
                   const rawArgs = typeof input === "string" ? input : (input as any)?.arguments;
                   void quickStoreFromSlash(rawArgs);
+                },
+              },
+              {
+                id: "local.memory.delete",
+                title: "Delete local memory entry by ID (0 tokens)...",
+                description:
+                  "Zero-token slash command to delete a memory entry by ID: /memory-delete <id>",
+                category: "Memory",
+                palette: false,
+                slash: {
+                  name: "memory-delete",
+                  arguments: true,
+                },
+                run: (input) => {
+                  const rawArgs = typeof input === "string" ? input : (input as any)?.arguments;
+                  void quickDeleteFromSlash(rawArgs);
+                },
+              },
+              {
+                id: "local.memory.import",
+                title: "Import existing AGENTS.md & session history (0 tokens)...",
+                description:
+                  "Zero-token command to import existing AGENTS.md/CLAUDE.md rules and compacted session summaries from opencode.db: /memory-import [limit]",
+                category: "Memory",
+                palette: true,
+                slash: {
+                  name: "memory-import",
+                  arguments: true,
+                },
+                run: (input) => {
+                  const rawArgs = typeof input === "string" ? input : (input as any)?.arguments;
+                  void quickImportFromSlash(rawArgs);
                 },
               },
             ],

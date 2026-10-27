@@ -6,10 +6,15 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import {
+  computeLexicalScore,
+  deleteMemoryEntry,
   ensureMemoryLayout,
+  getCoreMemories,
   getTopicSlugs,
+  importExistingMemory,
   installPlugin,
   loadCachedVectors,
+  matchesProjectScope,
   nextTopicId,
   parseSessionEntries,
   parseTopicEntries,
@@ -197,10 +202,10 @@ describe("storeMemoryFact, storeSessionCheckpoint, syncVectors, and searchMemory
         },
       });
 
-      assert.equal(registeredTools.length, 3);
+      assert.equal(registeredTools.length, 4);
       assert.deepEqual(
         registeredTools.map((t) => t.name),
-        ["memory_store", "memory_search", "memory_checkpoint"]
+        ["memory_store", "memory_delete", "memory_search", "memory_checkpoint"]
       );
       assert.ok(registeredHooks.has("context"));
       assert.ok(registeredHooks.has("compaction"));
@@ -218,6 +223,141 @@ describe("storeMemoryFact, storeSessionCheckpoint, syncVectors, and searchMemory
       if (typeof dispose === "function") {
         await dispose();
       }
+    });
+  });
+
+  it("supports memory_delete, in-place id updates, and supersedes lifecycle without leaving stale entries", async () => {
+    await withTempDir(async (tmpDir) => {
+      const v1 = await storeMemoryFact(tmpDir, {
+        topic: "environment",
+        id: "env-001",
+        tags: "permissions, cli",
+        fact: "cli.json has session.permissions=allow.",
+      });
+      assert.equal(v1.id, "env-001");
+      assert.equal(v1.updated, false);
+
+      // In-place update by ID
+      const v1Updated = await storeMemoryFact(tmpDir, {
+        topic: "environment",
+        id: "env-001",
+        tags: "permissions, cli, updated",
+        fact: "cli.json has session.permissions=prompt.",
+      });
+      assert.equal(v1Updated.id, "env-001");
+      assert.equal(v1Updated.updated, true);
+
+      let entries = parseTopicEntries(tmpDir);
+      assert.equal(entries.length, 1);
+      assert.equal(entries[0].fact, "cli.json has session.permissions=prompt.");
+
+      // Supersede env-001 with env-002
+      const v2 = await storeMemoryFact(tmpDir, {
+        topic: "environment",
+        id: "env-002",
+        supersedes: "env-001",
+        tags: "permissions, cli, hardened",
+        fact: "cli.json enforces prompt permissions with targeted ask guards.",
+      });
+      assert.equal(v2.id, "env-002");
+      assert.deepEqual(v2.superseded, ["env-001"]);
+
+      entries = parseTopicEntries(tmpDir);
+      assert.equal(entries.length, 1);
+      assert.equal(entries[0].id, "env-002");
+
+      const cachedAfterSupersede = loadCachedVectors(tmpDir);
+      assert.equal(cachedAfterSupersede.length, 1);
+      assert.equal(cachedAfterSupersede[0].id, "env-002");
+
+      // Direct delete
+      const delRes = await deleteMemoryEntry(tmpDir, "env-002, nonexistent-999");
+      assert.equal(delRes.deleted.length, 1);
+      assert.equal(delRes.deleted[0].id, "env-002");
+      assert.deepEqual(delRes.notFound, ["nonexistent-999"]);
+      assert.equal(parseTopicEntries(tmpDir).length, 0);
+      assert.equal(loadCachedVectors(tmpDir).length, 0);
+    });
+  });
+
+  it("supports project scoping, core pinned memories, and BM25 lexical scoring", async () => {
+    await withTempDir(async (tmpDir) => {
+      await storeMemoryFact(tmpDir, {
+        topic: "decisions",
+        id: "dec-core-001",
+        tags: "core, boundary",
+        core: true,
+        fact: "Always work inside C:/MAMPFiles and ask before touching external directories.",
+      });
+
+      await storeMemoryFact(tmpDir, {
+        topic: "decisions",
+        id: "dec-winnipeg-001",
+        tags: "winnipeg, cards, css",
+        project: "C:/MAMPFiles/client-code/winnipeg",
+        fact: "Winnipeg equal-height cards use flex-direction column on .card-body.",
+      });
+
+      await storeMemoryFact(tmpDir, {
+        topic: "decisions",
+        id: "dec-butte-001",
+        tags: "butte, events, calendar",
+        project: "C:/MAMPFiles/client-code/butte",
+        fact: "Butte events feed uses Cascade JSON block.",
+      });
+
+      const coreForWinnipeg = getCoreMemories(tmpDir, "C:/MAMPFiles/client-code/winnipeg");
+      assert.equal(coreForWinnipeg.length, 1);
+      assert.equal(coreForWinnipeg[0].id, "dec-core-001");
+
+      assert.equal(matchesProjectScope("winnipeg", "C:/MAMPFiles/client-code/winnipeg"), true);
+      assert.equal(matchesProjectScope("winnipeg", "C:/MAMPFiles/git/hannon-hill/_clients/uwinnipeg"), true);
+      assert.equal(matchesProjectScope("butte", "C:/MAMPFiles/client-code/winnipeg"), false);
+      assert.equal(matchesProjectScope("global", "C:/MAMPFiles/client-code/winnipeg"), true);
+
+      // Rule 1: Specific subfolder isolates from sibling projects
+      const winnipegHits = await searchMemory(
+        tmpDir,
+        "cards calendar events",
+        "hybrid",
+        10,
+        { project: "C:/MAMPFiles/client-code/winnipeg" }
+      );
+      const hitIds = winnipegHits.map((h) => h.entry.id);
+      assert.ok(hitIds.includes("dec-winnipeg-001"));
+      assert.ok(!hitIds.includes("dec-butte-001"));
+
+      // Rule 2: Umbrella root (C:/MAMPFiles) + prompt mentioning 'butte' isolates to global + butte
+      const umbrellaButteHits = await searchMemory(
+        tmpDir,
+        "update butte events calendar",
+        "hybrid",
+        10,
+        { project: "C:/MAMPFiles" }
+      );
+      const umbrellaButteIds = umbrellaButteHits.map((h) => h.entry.id);
+      assert.ok(umbrellaButteIds.includes("dec-butte-001"));
+      assert.ok(!umbrellaButteIds.includes("dec-winnipeg-001"));
+
+      // Rule 3: Umbrella root (C:/MAMPFiles) + prompt with NO project name allows all nested projects to compete
+      const umbrellaFallbackHits = await searchMemory(
+        tmpDir,
+        "equal-height cards flex-direction column",
+        "hybrid",
+        10,
+        { project: "C:/MAMPFiles" }
+      );
+      const umbrellaFallbackIds = umbrellaFallbackHits.map((h) => h.entry.id);
+      assert.ok(umbrellaFallbackIds.includes("dec-winnipeg-001"));
+      assert.ok(umbrellaFallbackIds.includes("dec-butte-001"));
+
+      // BM25 lexical score does not false-positive on short stopword substrings
+      const allEntries = loadCachedVectors(tmpDir);
+      const winnipegEntry = allEntries.find((e) => e.id === "dec-winnipeg-001");
+      const exactIdScore = computeLexicalScore(winnipegEntry, "dec-winnipeg-001", ["dec-winnipeg-001"], null);
+      const unrelatedScore = computeLexicalScore(winnipegEntry, "xyznonexistent", ["xyznonexistent"], null);
+      assert.ok(exactIdScore > 0.7);
+      assert.equal(unrelatedScore, 0);
     });
   });
 
@@ -250,6 +390,115 @@ describe("storeMemoryFact, storeSessionCheckpoint, syncVectors, and searchMemory
       assert.equal(entries[0].id, "sec-001-injected");
       assert.equal(entries[0].tags, "tag1, tag2 newline");
       assert.equal(entries[0].fact, "First line Second line");
+    });
+  });
+
+  it("imports AGENTS.md rules and compacted opencode.db sessions idempotently", async () => {
+    await withTempDir(async (tmpDir) => {
+      const memDir = path.join(tmpDir, "memory");
+      const agentsFile = path.join(tmpDir, "AGENTS.md");
+      const wrapperFile = path.join(tmpDir, "CLAUDE.md");
+      const dbPath = path.join(tmpDir, "opencode.db");
+
+      fs.writeFileSync(
+        agentsFile,
+        [
+          "# Global Instructions",
+          "",
+          "## Working Boundary",
+          "- Always work inside C:/MAMPFiles and ask before touching external directories.",
+          "",
+          "## Local Page URLs (XAMPP/Apache)",
+          "- C:/MAMPFiles is Apache's DocumentRoot mapping directly to http://localhost/.",
+          "",
+          "## New Code Style",
+          "- Write terse, top-to-bottom vanilla JavaScript without unnecessary IIFEs.",
+        ].join("\n"),
+        "utf8"
+      );
+      fs.writeFileSync(wrapperFile, "@" + agentsFile + "\n", "utf8");
+
+      const sqliteMod = await import("node:sqlite");
+      const db = new sqliteMod.DatabaseSync(dbPath);
+      db.exec(`
+        CREATE TABLE session_v2 (
+          id TEXT PRIMARY KEY,
+          title TEXT,
+          directory TEXT,
+          time_created INTEGER,
+          time_updated INTEGER,
+          time_archived INTEGER
+        );
+        CREATE TABLE session_message (
+          id TEXT PRIMARY KEY,
+          session_id TEXT,
+          type TEXT,
+          time_created INTEGER,
+          data TEXT
+        );
+      `);
+      db.prepare(
+        "INSERT INTO session_v2 (id, title, directory, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, NULL)"
+      ).run("ses_test_001", "Winnipeg Card Layout Fix", "C:/MAMPFiles/client-code/winnipeg", 1761500000000, 1761500500000);
+      db.prepare(
+        "INSERT INTO session_message (id, session_id, type, time_created, data) VALUES (?, ?, ?, ?, ?)"
+      ).run(
+        "msg_001",
+        "ses_test_001",
+        "user",
+        1761500000000,
+        JSON.stringify({ type: "user", text: "Fix the equal-height card layout on the Winnipeg landing page." })
+      );
+      db.prepare(
+        "INSERT INTO session_message (id, session_id, type, time_created, data) VALUES (?, ?, ?, ?, ?)"
+      ).run(
+        "msg_002",
+        "ses_test_001",
+        "assistant",
+        1761500500000,
+        JSON.stringify({
+          type: "assistant",
+          content: [
+            {
+              type: "tool",
+              name: "compress",
+              state: {
+                input: {
+                  topic: "Card Layout Fix",
+                  content: [{ summary: "Updated .card-body to use flex-direction: column and pushed .card-cta to the bottom with margin-top: auto." }]
+                }
+              }
+            },
+            {
+              type: "text",
+              text: "Verified equal-height cards across 375px, 768px, and 1280px viewports."
+            }
+          ]
+        })
+      );
+      db.close();
+
+      const firstRun = await importExistingMemory(memDir, {
+        agentsFiles: [wrapperFile],
+        dbPath: dbPath,
+      });
+
+      assert.equal(firstRun.importedFacts.length, 3);
+      assert.equal(firstRun.importedSessions.length, 1);
+      assert.equal(firstRun.syncResult.total, 4);
+
+      const secondRun = await importExistingMemory(memDir, {
+        agentsFiles: [wrapperFile],
+        dbPath: dbPath,
+      });
+      assert.equal(secondRun.importedFacts.length, 0);
+      assert.equal(secondRun.skippedFacts, 3);
+      assert.equal(secondRun.importedSessions.length, 0);
+      assert.equal(secondRun.skippedSessions, 1);
+
+      const hits = await searchMemory(memDir, "flex-direction column card-cta", "hybrid", 5);
+      assert.ok(hits.length >= 1);
+      assert.ok(hits[0].entry.id.startsWith("session:"));
     });
   });
 });

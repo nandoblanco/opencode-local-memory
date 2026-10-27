@@ -21,10 +21,11 @@ This plugin started as a folder of markdown files and CLI scripts wired together
 | :--- | :--- |
 | Local-first, zero-token TUI & CPU embeddings | Runs 384-dimensional `Xenova/all-MiniLM-L6-v2` embeddings locally on CPU and provides a zero-token `/memory` TUI browser with no cloud API keys or external servers |
 | Human-readable markdown source of truth | Stores atomic facts in `topics/*.md` and session checkpoints in `sessions/*.md` so every memory stays plain, editable markdown |
-| Automatic per-turn recall (`context` hook) | Before each model call, runs hybrid semantic + lexical search (`vectors.json`) against the user's prompt and injects the top matching facts and session checkpoints into `event.system` |
-| Atomic fact storage (`memory_store` & `/memory-add`) | Appends formatted blocks to `topics/<topic>.md`, auto-increments sequential IDs (`<prefix>-<nnn>`), registers new topic files in `memory.md`, and updates `vectors.json` in a single atomic call |
+| Automatic per-turn recall (`context` hook) | Before each model call, injects `core: true` pinned invariants and runs hybrid semantic + field-weighted Okapi BM25 search (`vectors.json`, with `project` scoping and umbrella-root detection) against the user's prompt |
+| Atomic fact storage & lifecycle (`memory_store`, `memory_delete`, `/memory-add`, `/memory-delete`) | Appends or updates blocks in `topics/<topic>.md`, auto-increments sequential IDs (`<prefix>-<nnn>`), prunes `supersedes` IDs, registers new topic files in `memory.md`, and writes `vectors.json` atomically |
 | Automatic session checkpoints (`compaction` hook) | Captures distilled session summaries (`sessions/YYYY-MM-DD_<slug>-<NN>.md`) automatically on session compaction or via `memory_checkpoint` and indexes them into `vectors.json` |
-| Interactive `/memory` TUI modal | Wide (`80%` default, configurable via `dialogWidth`) split-pane browser with colored filter pills (`^t` type, `^g` topic, `^r` mode, `^l` resync), instant 0ms lexical filtering refined by local vector similarity, and full session markdown preview |
+| Interactive `/memory` TUI modal | Wide (`80%` default, configurable via `dialogWidth`) split-pane browser with colored filter pills (`^t` type, `^g` topic, `^r` mode, `^b` import, `^l` resync), instant 0ms lexical filtering refined by local vector similarity, and full session markdown preview |
+| Zero-token history & rule import (`/memory-import`) | Imports existing `AGENTS.md` / `CLAUDE.md` rules into `topics/*.md` and compacted session summaries from `opencode.db` into `sessions/*.md` idempotently via `/memory-import`, `^b` inside `/memory`, or `npx @nandoblanco/opencode-local-memory import` |
 | Automatic first-run bootstrap | On a blank install, automatically creates `~/.config/opencode/memory` (or `$XDG_CONFIG_HOME/opencode/memory`) with `memory.md`, starter `topics/{preferences,decisions,environment,agent-behavior}.md`, and `sessions/README.md` |
 
 ## Installation
@@ -87,8 +88,8 @@ Clone this repository, run `npm install`, and run `node ./index.js install` (or 
 
 Once enabled, the plugin manages memory automatically during normal coding sessions:
 
-- **Automatic Storage (`memory_store`)**: When you state a preference or coding convention, make an architectural decision, uncover a non-obvious environment fact, or correct the agent, the model calls `memory_store` before finishing its turn.
-- **Automatic Recall (`context` hook + `memory_search`)**: The `context` hook injects relevant memories before each turn. For broader lookups, the model calls `memory_search` (`hybrid`, `semantic`, or `grep`).
+- **Automatic Storage & Lifecycle (`memory_store` & `memory_delete`)**: When you state a preference or coding convention, make an architectural decision, uncover a non-obvious environment fact, or correct the agent, the model calls `memory_store` before finishing its turn. When replacing or removing outdated facts, it updates entries in place via `id`, prunes superseded entries via `supersedes`, or calls `memory_delete`.
+- **Automatic Recall (`context` hook + `memory_search`)**: The `context` hook injects pinned `core: true` memories and relevant prompt matches (scoped to the active project or `global`, with automatic nested-project detection from umbrella roots) before each turn. For broader lookups, the model calls `memory_search` (`hybrid`, `semantic`, or `grep`).
 - **Automatic Checkpoints (`compaction` hook + `memory_checkpoint`)**: The plugin writes numbered session summaries to `sessions/YYYY-MM-DD_<slug>-<NN>.md` and indexes them into `vectors.json`.
 
 ### Zero-Token TUI Commands
@@ -98,7 +99,12 @@ Once enabled, the plugin manages memory automatically during normal coding sessi
    ```text
    /memory-add preferences | css, layout | Always verify layout changes with Playwright before reporting completion.
    ```
-3. **Custom keybind**: Bind `local.memory.search` in `~/.config/opencode/cli.json`:
+3. **Direct zero-token deletion (`/memory-delete`)**: Run `/memory-delete <id>` (supports comma-separated IDs) to remove outdated entries from their markdown source files and `vectors.json` immediately:
+   ```text
+   /memory-delete env-007, dec-002
+   ```
+4. **Import existing history (`/memory-import`)**: Run `/memory-import [limit]` (or press `^b` inside `/memory`) to import existing `AGENTS.md` / `CLAUDE.md` rules and past compacted session summaries from `opencode.db` without duplicating existing entries.
+5. **Custom keybind**: Bind `local.memory.search` in `~/.config/opencode/cli.json`:
    ```json
    {
    	"keybinds": {
@@ -117,6 +123,8 @@ Type filters inline in the search bar or toggle them with clickable filter pills
 | `/pattern/i` or `re:pattern` | Regular expression match across ID, tags, fact, and file path | `/dec-01[0-9]/i` |
 | `type:topics` / `type:sessions` / `type:all` | Filter to atomic topic facts (`topics/*.md`) or session checkpoints (`sessions/*.md`) (`type:facts`, `in:topics`, `in:sessions` also work) | `type:sessions plugin` |
 | `topic:<slug>` | Filter to a specific topic file (`topics/<slug>.md`) | `topic:decisions self-contained` |
+| `project:<slug>` | Filter to a specific project scope (`global`, `cms/<client>`, `git/<repo>`, or repo name) | `project:butte calendar` |
+| `core:true` or `is:core` | Filter to pinned core memories (`core: true`) | `is:core` |
 
 ## Keyboard Shortcuts (`/memory`)
 
@@ -129,6 +137,7 @@ Type filters inline in the search bar or toggle them with clickable filter pills
 | `Ctrl+T` | Cycle entry type filter pill (`all` -> `topics` -> `sessions`) |
 | `Ctrl+G` | Cycle topic file filter pill (`all` -> `decisions` -> `preferences` -> `environment` -> ...) |
 | `Ctrl+R` | Cycle search mode pill (`hybrid` -> `keyword` -> `regex`) |
+| `Ctrl+B` | Import existing `AGENTS.md` / `CLAUDE.md` rules and compacted `opencode.db` sessions |
 | `Ctrl+L` | Force resync markdown files (`topics/*.md` + `sessions/*.md`) into `vectors.json` |
 | `Esc` | Close popup |
 
@@ -156,24 +165,25 @@ Before each model turn, the server plugin's `ctx.session.hook("context")` handle
    - A non-obvious environment, path, port, or tooling fact is discovered
    - A recurring pattern emerges
    - The user corrects the model or repeats an instruction
-3. **Global vs. project scope rules**: Directs cross-project facts to `memory_store` (`topics/*.md`) and repository-specific conventions or asset IDs to the project's `AGENTS.md`.
-4. **Per-prompt auto-recall**: Extracts the latest user message (`extractLastUserText`), runs a hybrid semantic + lexical search against `vectors.json` when the prompt is at least 5 characters long, filters hits with `score >= minScore` (default `0.38`, top `topK = 6`), and injects matching facts directly into `<local-memory-plugin>`.
+3. **Global vs. project scope & pinned core memories (`normalizeProjectScope` & `getCoreMemories`)**: Directs cross-project facts to `project: "global"` (default) and project-specific facts to nested scopes (`cms/<client>`, `git/<repo>`, or repo name). When launched from an umbrella workspace root, `detectProjectsFromText()` detects referenced project names in the prompt (or falls back across nested scopes), and `getCoreMemories()` pins `core: true` invariants on every turn.
+4. **Per-prompt auto-recall**: Extracts the latest user message (`extractLastUserText`), runs a hybrid semantic + BM25 lexical search against `vectors.json` when the prompt is at least 5 characters long, filters hits with `score >= minScore` (default `0.38`, top `topK = 6`), and injects matching facts directly into `<local-memory-plugin>`.
 
-### 3. How Topic Files & IDs Are Created (`memory_store` & `storeMemoryFact`)
+### 3. How Topic Files & IDs Are Created (`memory_store`, `storeMemoryFact` & `deleteMemoryEntry`)
 
 When a storage trigger fires (or when you run `/memory-add` or `npx @nandoblanco/opencode-local-memory store`), `storeMemoryFact(rootDir, input)` executes an atomic write-and-embed pipeline:
 
 1. **Choosing an existing vs. new topic**: The model checks the injected `Available topics` list. If the fact matches an existing category (`preferences`, `decisions`, `environment`, `agent-behavior`), it passes that slug. If the fact belongs to a new domain (for example, `tools`, `sql`, or `frontend-css-patterns`), it passes a new kebab-case slug.
 2. **Automatic topic file creation**: Normalizes the slug via `.toLowerCase().replace(/[^a-z0-9-_]/g, "-")`. If `topics/<slug>.md` does not exist yet, the plugin creates it with a `# <Slug>` heading and appends `- \`topics/<slug>.md\` - <slug> entries` to `memory.md`.
-3. **Sequential ID generation (`nextTopicId`)**: Scans existing `- id: <prefix>-<nnn>` blocks in `topics/<slug>.md`, preserves the file's prefix convention (for example, `dec-016` increments to `dec-017`, while a new `tools.md` file starts at `tools-001`), and formats the new YAML-style entry block with today's `YYYY-MM-DD` date.
-4. **Immediate vector indexing**: Embeds `fact + " " + tags` into a 384-dimensional vector and updates `vectors.json` and the in-memory cache immediately so the fact is searchable on the very next turn.
+3. **Sequential ID generation & lifecycle (`nextTopicId` & `deleteMemoryEntry`)**: Scans existing `- id: <prefix>-<nnn>` blocks in `topics/<slug>.md`, preserves the file's prefix convention (for example, `dec-016` increments to `dec-017`, while a new `tools.md` file starts at `tools-001`), and formats the new YAML-style entry block with today's `YYYY-MM-DD` date. Passing an existing `id` updates that block in place, and passing `supersedes` (or calling `deleteMemoryEntry`) removes outdated IDs from their markdown source files automatically.
+4. **Immediate vector indexing**: Embeds `fact + " " + tags` into a 384-dimensional vector and writes `vectors.json` atomically (`vectors.json.tmp.<pid>`) so the fact is searchable on the very next turn.
 
-### 4. Session Checkpoints (`memory_checkpoint` & `compaction` Hook)
+### 4. Session Checkpoints & History Import (`memory_checkpoint`, `compaction` Hook & `importExistingMemory`)
 
 `storeSessionCheckpoint(rootDir, input)` writes session summaries to `sessions/YYYY-MM-DD_<slug>-<NN>.md` in two ways:
 
 1. **Model-initiated (`memory_checkpoint` tool)**: At the end of significant work sessions, the model passes a `slug`, `title`, and structured markdown `summary` (`What was built/fixed/decided`, `Key decisions`, `Problems solved`, `Outcome`).
 2. **Automatic compaction (`compaction` hook)**: When OpenCode compacts a conversation (`ctx.session.hook("compaction")`), the plugin derives a 4-word slug from the last active user prompt, writes a numbered checkpoint file, records `.session-state`, and calls `syncVectors()` so the session summary is indexed into `vectors.json`.
+3. **Idempotent rule & DB history import (`importExistingMemory`)**: Scans `AGENTS.md` / `CLAUDE.md` files (including `@path` includes) via `parseAgentsMarkdownRules()` and reads OpenCode's SQLite database (`session_v2` / `session_message` and V1 `session` / `message` / `part`) read-only via `importFromOpenCodeDb()`, deduplicating by normalized fact fingerprint and `**Session ID**` so re-running `/memory-import` never duplicates entries.
 
 Checkpoint numbers (`-01`, `-02`, ...) auto-increment per `YYYY-MM-DD_<slug>` prefix so multiple checkpoints on the same day never collide.
 
@@ -190,10 +200,10 @@ const vec = Array.from(out.data); // -> [0.021, -0.084, 0.112, ... 384 numbers]
 
 - **Semantic vs. keyword matching**: Exact keyword search (`grep`) only matches shared characters. If you store *"Always run backup.ps1 before editing"* and later ask *"how do we undo changes?"*, keyword search returns nothing because no words overlap. The embedding model places both sentences near each other in 384-dimensional space, so their dot product (`dot(queryVec, entry.vector)`) scores high even with zero shared words.
 - **Model installation and local cache**: `@xenova/transformers` is a regular npm dependency in `package.json` that runs ONNX models on CPU inside Node.js or Bun (no Python or external server). On first run, `pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2")` downloads `onnx/model_quantized.onnx` (~23 MB) and `tokenizer.json` from Hugging Face into `node_modules/@xenova/transformers/.cache/Xenova/all-MiniLM-L6-v2/`. Every subsequent run loads the quantized model from local disk in milliseconds, offline.
-- **Incremental vector sync (`syncVectors`)**: Parses all `topics/*.md` blocks and `sessions/*.md` summaries and compares each entry's `id`, `fact`, and `tags` against `vectors.json`. Unchanged entries reuse their cached 384-dimensional vectors; only new or modified entries run through the embedding pipeline.
-- **Scoring formula (`searchMemory`)**:
+- **Incremental vector sync (`syncVectors`)**: Parses all `topics/*.md` blocks and `sessions/*.md` summaries (with per-file `mtimeMs` caching in `parsedFileCache`) and compares each entry's `id`, `fact`, `tags`, `project`, and `core` against `vectors.json`. Unchanged entries reuse their cached 384-dimensional vectors and serialized JSON lines; only new or modified entries run through the embedding pipeline.
+- **Scoring formula (`searchMemory` & `computeLexicalScore`)**:
    - `semanticScore`: Dot product (cosine similarity on L2-normalized vectors) between the 384-number query vector and each stored entry vector (`0.0` to `1.0`), computed in plain JavaScript in under 2 milliseconds.
-   - `lexicalScore`: `+0.35` if the full lowercase query is an exact substring of the entry haystack (`id + tags + fact + file`), or `(matchedWords / queryWords) * 0.25` for partial token matches (tokens >= 2 characters).
+   - `lexicalScore`: `+0.35` if the full lowercase query is an exact substring of the entry haystack (`id + tags + fact + file`), or up to `+0.35` using field-weighted Okapi BM25 (`buildCorpusStats` + `computeLexicalScore`) across `id` (`3.0x`), `tags` (`2.5x`), `file` (`1.5x`), and `fact` (`1.0x`) with stopword filtering.
    - Final score: `semanticScore + lexicalScore` in `hybrid` mode (default), `semanticScore` in `semantic` mode, or `lexicalScore` in `grep` mode.
 - **In-memory & cross-process caching**:
    - `loadCachedVectors()` caches parsed entries in memory and validates `vectors.json` via `fs.statSync(vecFile).mtimeMs` and resolved path (`cachedRootDir`), automatically reloading if another process or CLI command updates `vectors.json`.
@@ -209,28 +219,30 @@ const vec = Array.from(out.data); // -> [0.021, -0.084, 0.112, ... 384 numbers]
    - On every keystroke, `filterEntriesSync()` runs synchronously in 0ms against the in-memory `vectors.json` entries so the results list updates immediately with zero input lag.
    - When `mode` is `"hybrid"` and the query is at least 2 characters long, `runSearch()` then awaits `searchMemory(rootDir, q, "hybrid", 50)` (guarded by a monotonic `searchSeq` counter to discard stale async results) and refines the list with semantic vector similarity scores (`score >= 0.22`).
 3. **Split-pane layout & full session markdown preview**:
-   - Renders interactive `Pill` components beneath the search bar for `type:<filter>` (`^t`), `topic:<slug>` (`^g`), and `mode:<mode>` (`^r`).
+   - Renders interactive `Pill` components beneath the search bar for `type:<filter>` (`^t`), `topic:<slug>` (`^g`), `mode:<mode>` (`^r`), `import` (`^b`), and `resync` (`^l`).
    - Splits the main body into a 44%-width left results list (entry ID, hybrid score, source file, and 1-line summary) and a 56%-width right preview pane (metadata card, search-term highlighted fact text, and full markdown file content via `readFullSessionMarkdown()` whenever a `sessions/*.md` checkpoint is selected).
 
 ### 7. Agent Tools Registered by the Server Plugin
 
 | Tool Name | Required Inputs | Optional Inputs | Behavior |
 | :--- | :--- | :--- | :--- |
-| `memory_store` | `topic`, `tags`, `fact` | `id` | Creates `topics/<topic>.md` if missing, registers it in `memory.md`, assigns the next `<prefix>-<nnn>` ID, appends the entry block, and updates `vectors.json`. |
-| `memory_search` | `query` | `mode` (`hybrid`, `semantic`, `grep`), `topN` (default `8`) | Searches all topic facts and session checkpoints and returns ranked entries with scores, IDs, dates, file paths, tags, and facts. |
+| `memory_store` | `topic`, `tags`, `fact` | `id`, `supersedes`, `project` (default `global`), `core` (`boolean`) | Creates `topics/<topic>.md` if missing, registers it in `memory.md`, updates in place when `id` exists (or assigns the next `<prefix>-<nnn>` ID), prunes `supersedes` IDs, and updates `vectors.json`. |
+| `memory_delete` | `id` | *(none)* | Deletes one or more memory entries by ID (or comma-separated IDs) from `topics/*.md` or `sessions/*.md` and updates `vectors.json`. |
+| `memory_search` | `query` | `mode` (`hybrid`, `semantic`, `grep`), `topN` (default `8`), `project` (`all`, `global`, or project slug), `coreOnly` (`boolean`) | Searches topic facts and session checkpoints and returns ranked entries with scores, IDs, dates, file paths, tags, and facts. |
 | `memory_checkpoint` | `slug`, `title`, `summary` | `project` (default `global`), `contextPct` | Writes `sessions/YYYY-MM-DD_<slug>-<NN>.md`, updates `.session-state`, and indexes the checkpoint into `vectors.json`. |
 
 ### 8. Token Usage Breakdown
 
-Local embedding, TUI browsing, and direct `/memory-add` storage use zero LLM tokens:
+Local embedding, TUI browsing, and direct `/memory-add`, `/memory-delete`, and `/memory-import` commands use zero LLM tokens:
 
 | Operation | Token Cost | Why |
 | :--- | :--- | :--- |
 | Interactive `/memory` TUI modal (`Ctrl+M`) | **0 tokens** | Reads `vectors.json` and `sessions/*.md` directly from disk and runs `Xenova/all-MiniLM-L6-v2` locally on CPU without an LLM request |
-| Direct TUI fact storage (`/memory-add`) | **0 tokens** | Parses `<topic> \| <tags> \| <fact>`, appends to `topics/<topic>.md`, and updates `vectors.json` locally in Node.js |
+| Direct TUI fact storage & deletion (`/memory-add`, `/memory-delete`) | **0 tokens** | Appends or deletes entries in `topics/*.md` and updates `vectors.json` locally in Node.js |
+| History & rule import (`/memory-import`, `Ctrl+B`) | **0 tokens** | Parses `AGENTS.md` / `CLAUDE.md` rules and reads compacted `opencode.db` sessions directly via SQLite and local embeddings |
 | Automatic compaction checkpoint (`compaction` hook) | **0 extra turn tokens** | Captures the existing compaction summary event and indexes it locally into `sessions/*.md` and `vectors.json` |
 | Standalone CLI (`npx @nandoblanco/opencode-local-memory ...`) | **0 tokens** | Runs directly in Node.js outside the model turn |
-| Per-turn auto-recall (`context` hook) & agent tools | **~250-450 system/schema tokens** | Injects compact instructions plus top matching facts (`score >= 0.38`, max `topK = 6`) into `event.system` and registers `memory_store`, `memory_search`, and `memory_checkpoint` |
+| Per-turn auto-recall (`context` hook) & agent tools | **~250-450 system/schema tokens** | Injects compact instructions plus pinned `core` memories and top matching facts (`score >= 0.38`, max `topK = 6`) into `event.system` and registers `memory_store`, `memory_delete`, `memory_search`, and `memory_checkpoint` |
 
 ## Directory Structure
 
@@ -253,6 +265,8 @@ Each entry in `topics/<topic>.md` uses a clean, human-editable block format:
 ```yaml
 - id: dec-016
   date: 2026-10-25
+  project: global
+  core: true
   tags: [opencode, plugin, local-memory, self-contained]
   fact: All persistent memory rules are injected directly by opencode-local-memory's context hook.
 ```
@@ -261,7 +275,10 @@ Each entry in `topics/<topic>.md` uses a clean, human-editable block format:
 
 ```sh
 # One-command setup: updates opencode.jsonc + cli.json, scaffolds memory/, and warms vectors.json
-npx @nandoblanco/opencode-local-memory install [--dir /path/to/memory]
+npx @nandoblanco/opencode-local-memory install [--dir /path/to/memory] [--import]
+
+# Import existing AGENTS.md/CLAUDE.md rules and compacted session summaries from opencode.db
+npx @nandoblanco/opencode-local-memory import [--dir /path/to/memory] [--db /path/to/opencode.db] [--agents /path/to/AGENTS.md] [--limit 40]
 
 # Incrementally sync topics/*.md and sessions/*.md into vectors.json
 npx @nandoblanco/opencode-local-memory sync
@@ -274,6 +291,9 @@ npx @nandoblanco/opencode-local-memory recall "exact keyword"
 
 # Store a new fact from the command line
 npx @nandoblanco/opencode-local-memory store decisions "arch, api" "Use REST endpoints for batch exports."
+
+# Delete one or more entries by ID (or comma-separated IDs)
+npx @nandoblanco/opencode-local-memory delete dec-002
 ```
 
 ## Configuration Options
