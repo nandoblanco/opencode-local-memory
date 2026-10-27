@@ -1,8 +1,8 @@
 # opencode-local-memory
 
-Local-first persistent memory plugin for OpenCode with automatic per-turn semantic recall, atomic fact storage, session compaction checkpoints, and a zero-token interactive TUI popup.
+Local-first, zero-token persistent memory plugin for OpenCode with automatic per-turn semantic recall, atomic fact storage, session compaction checkpoints, and a configurable split-pane `/memory` TUI popup.
 
-![opencode-local-memory TUI popup](./assets/screenshot.svg)
+![opencode-local-memory TUI preview](./assets/screenshot.png)
 
 ## Background
 
@@ -15,17 +15,21 @@ This plugin started as a folder of markdown files and CLI scripts wired together
 3. **Self-contained lifecycle hooks**: The plugin's `context` hook recalls relevant memories for each prompt and injects the storage and recall rules directly into `<local-memory-plugin>`, so you do not need custom `AGENTS.md` instructions.
 4. **Zero-token TUI search & store**: Browse, filter, and add memories directly inside OpenCode via `/memory` and `/memory-add` without making an LLM request.
 
-## Highlights
+## Features
 
-- **Automatic Per-Turn Recall (`context` hook)**: Before each model call, runs hybrid semantic + lexical search (`vectors.json`) against the user's prompt and injects the top matching facts and session checkpoints into `event.system`.
-- **Atomic Fact Storage (`memory_store` tool & `/memory-add`)**: Appends formatted blocks to `topics/<topic>.md`, auto-increments sequential IDs (`<prefix>-<nnn>`), registers new topic files in `memory.md`, and updates `vectors.json` in a single atomic call.
-- **Automatic Session Checkpoints (`compaction` hook & `memory_checkpoint` tool)**: Captures distilled session summaries (`sessions/YYYY-MM-DD_<slug>-<NN>.md`) automatically on session compaction or at the end of significant work and indexes them into `vectors.json`.
-- **Zero-Token Split-Pane TUI Popup (`/memory`)**: Filter across all atomic facts and session checkpoints in real time on the left while inspecting highlighted facts and full session markdown on the right.
-- **Automatic First-Run Bootstrap**: On a blank install, automatically creates `~/.config/opencode/memory` (or `$XDG_CONFIG_HOME/opencode/memory`) with `memory.md`, starter `topics/{preferences,decisions,environment,agent-behavior}.md`, and `sessions/README.md`.
+| Feature | Details |
+| :--- | :--- |
+| Local-first, zero-token TUI & CPU embeddings | Runs 384-dimensional `Xenova/all-MiniLM-L6-v2` embeddings locally on CPU and provides a zero-token `/memory` TUI browser with no cloud API keys or external servers |
+| Human-readable markdown source of truth | Stores atomic facts in `topics/*.md` and session checkpoints in `sessions/*.md` so every memory stays plain, editable markdown |
+| Automatic per-turn recall (`context` hook) | Before each model call, runs hybrid semantic + lexical search (`vectors.json`) against the user's prompt and injects the top matching facts and session checkpoints into `event.system` |
+| Atomic fact storage (`memory_store` & `/memory-add`) | Appends formatted blocks to `topics/<topic>.md`, auto-increments sequential IDs (`<prefix>-<nnn>`), registers new topic files in `memory.md`, and updates `vectors.json` in a single atomic call |
+| Automatic session checkpoints (`compaction` hook) | Captures distilled session summaries (`sessions/YYYY-MM-DD_<slug>-<NN>.md`) automatically on session compaction or via `memory_checkpoint` and indexes them into `vectors.json` |
+| Interactive `/memory` TUI modal | Wide (`80%` default, configurable via `dialogWidth`) split-pane browser with colored filter pills (`^t` type, `^g` topic, `^r` mode, `^l` resync), instant 0ms lexical filtering refined by local vector similarity, and full session markdown preview |
+| Automatic first-run bootstrap | On a blank install, automatically creates `~/.config/opencode/memory` (or `$XDG_CONFIG_HOME/opencode/memory`) with `memory.md`, starter `topics/{preferences,decisions,environment,agent-behavior}.md`, and `sessions/README.md` |
 
 ## Installation
 
-### Option 1: One-Command Setup (Recommended)
+### Option 1: One-Command Install (Recommended)
 
 Run the built-in installer to automatically register the server and TUI plugins in `~/.config/opencode/opencode.jsonc` and `~/.config/opencode/cli.json` (preserving existing comments and settings), create `~/.config/opencode/memory`, and pre-warm the local embedding model:
 
@@ -49,48 +53,31 @@ opencode plugin add github:nandoblanco/opencode-local-memory
 
 ### Option 2: Manual Configuration
 
-Add `opencode-local-memory` to `~/.config/opencode/opencode.jsonc` (or `$XDG_CONFIG_HOME/opencode/opencode.jsonc`):
+Add `opencode-local-memory` to `~/.config/opencode/opencode.jsonc` and `~/.config/opencode/cli.json`:
 
 ```jsonc
 {
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-local-memory"]
-}
-```
-
-Or pass custom options (such as a custom memory directory or similarity threshold):
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": [
-    {
-      "package": "opencode-local-memory",
-      "options": {
-        "directory": "~/.config/opencode/memory",
-        "minScore": 0.38,
-        "topK": 6
-      }
-    }
-  ]
-}
-```
-
-If you connect the TUI to a remote server, you can also add `opencode-local-memory` to `~/.config/opencode/cli.json`:
-
-```json
-{
-  "plugins": ["opencode-local-memory"]
+	"plugins": [
+		{
+			"package": "opencode-local-memory",
+			"options": {
+				"directory": "~/.config/opencode/memory",
+				"minScore": 0.38,
+				"topK": 6,
+				"dialogWidth": "80%"
+			}
+		}
+	]
 }
 ```
 
 ### From a Local Directory
 
-Clone this repository, run `npm install`, and run `node ./index.js install` (or reference `"file:///path/to/opencode-local-memory"` in `opencode.jsonc`):
+Clone this repository, run `npm install`, and run `node ./index.js install` (or reference `"file:///path/to/opencode-local-memory"` in `opencode.jsonc` and `cli.json`):
 
 ```json
 {
-  "plugins": ["file:///path/to/opencode-local-memory"]
+	"plugins": ["file:///path/to/opencode-local-memory"]
 }
 ```
 
@@ -106,17 +93,17 @@ Once enabled, the plugin manages memory automatically during normal coding sessi
 
 ### Zero-Token TUI Commands
 
-1. **Interactive search popup**: Run `/memory` (or `/memory <query>`) or press `Ctrl+P` and select `Search local memory (0 tokens)...`.
-2. **Direct zero-token storage**: Run `/memory-add <topic> | <tags> | <fact>` to append a fact and embed it into `vectors.json` immediately without invoking the AI:
+1. **Interactive `/memory` popup**: Run `/memory` (or `/memory <query>`) or press `Ctrl+P` and select `Search local memory (0 tokens)...`.
+2. **Direct zero-token storage (`/memory-add`)**: Run `/memory-add <topic> | <tags> | <fact>` to append a fact and embed it into `vectors.json` immediately without invoking the AI:
    ```text
    /memory-add preferences | css, layout | Always verify layout changes with Playwright before reporting completion.
    ```
 3. **Custom keybind**: Bind `local.memory.search` in `~/.config/opencode/cli.json`:
    ```json
    {
-     "keybinds": {
-       "local.memory.search": "ctrl+m"
-     }
+   	"keybinds": {
+   		"local.memory.search": "ctrl+m"
+   	}
    }
    ```
 
@@ -128,26 +115,26 @@ Type filters inline in the search bar or toggle them with clickable filter pills
 | :--- | :--- | :--- |
 | `term1 term2` | Hybrid semantic (`Xenova/all-MiniLM-L6-v2`) + lexical search | `winnipeg velocity cards` |
 | `/pattern/i` or `re:pattern` | Regular expression match across ID, tags, fact, and file path | `/dec-01[0-9]/i` |
-| `type:topics` / `type:sessions` / `type:all` | Filter to atomic topic facts (`topics/*.md`) or session checkpoints (`sessions/*.md`) | `type:sessions plugin` |
+| `type:topics` / `type:sessions` / `type:all` | Filter to atomic topic facts (`topics/*.md`) or session checkpoints (`sessions/*.md`) (`type:facts`, `in:topics`, `in:sessions` also work) | `type:sessions plugin` |
 | `topic:<slug>` | Filter to a specific topic file (`topics/<slug>.md`) | `topic:decisions self-contained` |
 
-## Keyboard Shortcuts Inside `/memory`
+## Keyboard Shortcuts (`/memory`)
 
 | Key | Action |
 | :--- | :--- |
-| `Enter` | Copy the selected memory entry to the clipboard and close the popup |
-| `Up` / `Down` or `Ctrl+K` / `Ctrl+N` | Move selection up or down |
-| `PageUp` / `PageDown` or `Ctrl+U` / `Ctrl+D` | Jump 6 items (or scroll the right preview pane when focused) |
+| `Enter` | Copy the selected memory entry (`[id] (file): fact`) to the clipboard and close the popup |
+| `Up` / `Down` or `Ctrl+K` / `Ctrl+N` | Move selection up or down (`j`/`k` also work when the Results List pane is focused) |
+| `PageUp` / `PageDown` or `Ctrl+U` / `Ctrl+D` | Jump 6 items up/down (or scroll the right Preview pane by 8 lines when focused) |
 | `Tab` / `Shift+Tab` | Switch focus between Search Input, Results List, and Preview Pane |
-| `Ctrl+T` | Cycle entry type filter (`all`, `topics`, `sessions`) |
-| `Ctrl+G` | Cycle topic file filter (`all`, `decisions`, `preferences`, `environment`, ...) |
-| `Ctrl+R` | Cycle search mode (`hybrid`, `keyword`, `regex`) |
+| `Ctrl+T` | Cycle entry type filter pill (`all` -> `topics` -> `sessions`) |
+| `Ctrl+G` | Cycle topic file filter pill (`all` -> `decisions` -> `preferences` -> `environment` -> ...) |
+| `Ctrl+R` | Cycle search mode pill (`hybrid` -> `keyword` -> `regex`) |
 | `Ctrl+L` | Force resync markdown files (`topics/*.md` + `sessions/*.md`) into `vectors.json` |
 | `Esc` | Close popup |
 
 ## How It Works (Architecture & Internals)
 
-### 1. Memory Directory Resolution & First-Run Bootstrap
+### 1. Memory Directory Resolution & First-Run Bootstrap (`resolveMemoryDir` & `ensureMemoryLayout`)
 
 When the plugin initializes, `resolveMemoryDir()` selects the active memory directory in this order:
 
@@ -172,7 +159,7 @@ Before each model turn, the server plugin's `ctx.session.hook("context")` handle
 3. **Global vs. project scope rules**: Directs cross-project facts to `memory_store` (`topics/*.md`) and repository-specific conventions or asset IDs to the project's `AGENTS.md`.
 4. **Per-prompt auto-recall**: Extracts the latest user message (`extractLastUserText`), runs a hybrid semantic + lexical search against `vectors.json` when the prompt is at least 5 characters long, filters hits with `score >= minScore` (default `0.38`, top `topK = 6`), and injects matching facts directly into `<local-memory-plugin>`.
 
-### 3. How Topic Files & IDs Are Created (`memory_store`)
+### 3. How Topic Files & IDs Are Created (`memory_store` & `storeMemoryFact`)
 
 When a storage trigger fires (or when you run `/memory-add` or `npx opencode-local-memory store`), `storeMemoryFact(rootDir, input)` executes an atomic write-and-embed pipeline:
 
@@ -190,7 +177,7 @@ When a storage trigger fires (or when you run `/memory-add` or `npx opencode-loc
 
 Checkpoint numbers (`-01`, `-02`, ...) auto-increment per `YYYY-MM-DD_<slug>` prefix so multiple checkpoints on the same day never collide.
 
-### 5. Local Embedding Model, Hybrid Search & Caching
+### 5. Local Embedding Model, Hybrid Search & Caching (`syncVectors` & `searchMemory`)
 
 `opencode-local-memory` uses `Xenova/all-MiniLM-L6-v2`, a 23 MB sentence-embedding model that converts any sentence into a 384-number vector representing its meaning:
 
@@ -205,15 +192,27 @@ const vec = Array.from(out.data); // -> [0.021, -0.084, 0.112, ... 384 numbers]
 - **Model installation and local cache**: `@xenova/transformers` is a regular npm dependency in `package.json` that runs ONNX models on CPU inside Node.js or Bun (no Python or external server). On first run, `pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2")` downloads `onnx/model_quantized.onnx` (~23 MB) and `tokenizer.json` from Hugging Face into `node_modules/@xenova/transformers/.cache/Xenova/all-MiniLM-L6-v2/`. Every subsequent run loads the quantized model from local disk in milliseconds, offline.
 - **Incremental vector sync (`syncVectors`)**: Parses all `topics/*.md` blocks and `sessions/*.md` summaries and compares each entry's `id`, `fact`, and `tags` against `vectors.json`. Unchanged entries reuse their cached 384-dimensional vectors; only new or modified entries run through the embedding pipeline.
 - **Scoring formula (`searchMemory`)**:
-  - `semanticScore`: Dot product (cosine similarity on L2-normalized vectors) between the 384-number query vector and each stored entry vector (`0.0` to `1.0`), computed in plain JavaScript in under 2 milliseconds.
-  - `lexicalScore`: `+0.35` if the full lowercase query is an exact substring of the entry haystack (`id + tags + fact + file`), or `(matchedWords / queryWords) * 0.25` for partial token matches (tokens >= 2 characters).
-  - Final score: `semanticScore + lexicalScore` in `hybrid` mode (default), `semanticScore` in `semantic` mode, or `lexicalScore` in `grep` mode.
+   - `semanticScore`: Dot product (cosine similarity on L2-normalized vectors) between the 384-number query vector and each stored entry vector (`0.0` to `1.0`), computed in plain JavaScript in under 2 milliseconds.
+   - `lexicalScore`: `+0.35` if the full lowercase query is an exact substring of the entry haystack (`id + tags + fact + file`), or `(matchedWords / queryWords) * 0.25` for partial token matches (tokens >= 2 characters).
+   - Final score: `semanticScore + lexicalScore` in `hybrid` mode (default), `semanticScore` in `semantic` mode, or `lexicalScore` in `grep` mode.
 - **In-memory & cross-process caching**:
-  - `loadCachedVectors()` caches parsed entries in memory and validates `vectors.json` via `fs.statSync(vecFile).mtimeMs` and resolved path (`cachedRootDir`), automatically reloading if another process or CLI command updates `vectors.json`.
-  - `queryVecCache` keeps an in-memory 128-entry FIFO cache of normalized query embeddings to avoid re-embedding repeated prompts.
-  - `lastContextKey` caches the generated `<local-memory-plugin>` system block per `(userText, cachedVersion)` pair so duplicate hook invocations within the same turn do zero extra work.
+   - `loadCachedVectors()` caches parsed entries in memory and validates `vectors.json` via `fs.statSync(vecFile).mtimeMs` and resolved path (`cachedRootDir`), automatically reloading if another process or CLI command updates `vectors.json`.
+   - `queryVecCache` keeps an in-memory 128-entry FIFO cache of normalized query embeddings to avoid re-embedding repeated prompts.
+   - `lastContextKey` caches the generated `<local-memory-plugin>` system block per `(userText, cachedVersion)` pair so duplicate hook invocations within the same turn do zero extra work.
 
-### 6. Agent Tools Registered by the Server Plugin
+### 6. Interactive OpenTUI `/memory` Modal Architecture (`tui.ts`)
+
+1. **Wide modal layout (`applyDialogWidth` & `dialog.set`)**:
+   - Calls `context.ui.dialog.show(...)` followed by `context.ui.dialog.set({ size: "xlarge", centered: true })` so the dialog opens wide without being reset to default width.
+   - Inside `onMount` and `ref`, `applyDialogWidth()` walks upward from `rootRef` to the outer `absolute`-positioned dialog container and sets `width: "80%"` (or your configured `dialogWidth`), `maxWidth: "80%"`, and `minWidth: 76`.
+2. **Two-phase 0ms lexical + async hybrid search (`runSearch`)**:
+   - On every keystroke, `filterEntriesSync()` runs synchronously in 0ms against the in-memory `vectors.json` entries so the results list updates immediately with zero input lag.
+   - When `mode` is `"hybrid"` and the query is at least 2 characters long, `runSearch()` then awaits `searchMemory(rootDir, q, "hybrid", 50)` (guarded by a monotonic `searchSeq` counter to discard stale async results) and refines the list with semantic vector similarity scores (`score >= 0.22`).
+3. **Split-pane layout & full session markdown preview**:
+   - Renders interactive `Pill` components beneath the search bar for `type:<filter>` (`^t`), `topic:<slug>` (`^g`), and `mode:<mode>` (`^r`).
+   - Splits the main body into a 44%-width left results list (entry ID, hybrid score, source file, and 1-line summary) and a 56%-width right preview pane (metadata card, search-term highlighted fact text, and full markdown file content via `readFullSessionMarkdown()` whenever a `sessions/*.md` checkpoint is selected).
+
+### 7. Agent Tools Registered by the Server Plugin
 
 | Tool Name | Required Inputs | Optional Inputs | Behavior |
 | :--- | :--- | :--- | :--- |
@@ -221,7 +220,19 @@ const vec = Array.from(out.data); // -> [0.021, -0.084, 0.112, ... 384 numbers]
 | `memory_search` | `query` | `mode` (`hybrid`, `semantic`, `grep`), `topN` (default `8`) | Searches all topic facts and session checkpoints and returns ranked entries with scores, IDs, dates, file paths, tags, and facts. |
 | `memory_checkpoint` | `slug`, `title`, `summary` | `project` (default `global`), `contextPct` | Writes `sessions/YYYY-MM-DD_<slug>-<NN>.md`, updates `.session-state`, and indexes the checkpoint into `vectors.json`. |
 
-## Memory Directory Structure
+### 8. Token Usage Breakdown
+
+Local embedding, TUI browsing, and direct `/memory-add` storage use zero LLM tokens:
+
+| Operation | Token Cost | Why |
+| :--- | :--- | :--- |
+| Interactive `/memory` TUI modal (`Ctrl+M`) | **0 tokens** | Reads `vectors.json` and `sessions/*.md` directly from disk and runs `Xenova/all-MiniLM-L6-v2` locally on CPU without an LLM request |
+| Direct TUI fact storage (`/memory-add`) | **0 tokens** | Parses `<topic> \| <tags> \| <fact>`, appends to `topics/<topic>.md`, and updates `vectors.json` locally in Node.js |
+| Automatic compaction checkpoint (`compaction` hook) | **0 extra turn tokens** | Captures the existing compaction summary event and indexes it locally into `sessions/*.md` and `vectors.json` |
+| Standalone CLI (`npx opencode-local-memory ...`) | **0 tokens** | Runs directly in Node.js outside the model turn |
+| Per-turn auto-recall (`context` hook) & agent tools | **~250-450 system/schema tokens** | Injects compact instructions plus top matching facts (`score >= 0.38`, max `topK = 6`) into `event.system` and registers `memory_store`, `memory_search`, and `memory_checkpoint` |
+
+## Directory Structure
 
 ```text
 ~/.config/opencode/memory/
@@ -246,9 +257,7 @@ Each entry in `topics/<topic>.md` uses a clean, human-editable block format:
   fact: All persistent memory rules are injected directly by opencode-local-memory's context hook.
 ```
 
-## Standalone CLI Usage
-
-You can also run `index.js` directly from the terminal or from scripts:
+## CLI Commands
 
 ```sh
 # One-command setup: updates opencode.jsonc + cli.json, scaffolds memory/, and warms vectors.json
@@ -267,7 +276,32 @@ npx opencode-local-memory recall "exact keyword"
 npx opencode-local-memory store decisions "arch, api" "Use REST endpoints for batch exports."
 ```
 
-Set `OPENCODE_MEMORY_DIR=/path/to/memory` to override the memory directory location via environment variable.
+## Configuration Options
+
+Options can be passed in `~/.config/opencode/opencode.jsonc` and `~/.config/opencode/cli.json` or via environment variables:
+
+```jsonc
+{
+	"plugins": [
+		{
+			"package": "opencode-local-memory",
+			"options": {
+				"directory": "~/.config/opencode/memory",
+				"minScore": 0.38,
+				"topK": 6,
+				"dialogWidth": "80%"
+			}
+		}
+	]
+}
+```
+
+| Option | Env Variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `directory` | `OPENCODE_MEMORY_DIR` | `~/.config/opencode/memory` | Path to the persistent memory directory (`memory.md`, `topics/`, `sessions/`, `vectors.json`) |
+| `minScore` | *(none)* | `0.38` | Minimum hybrid similarity score (`0.0`-`1.0`) for per-prompt auto-recall injection |
+| `topK` | *(none)* | `6` | Maximum auto-recalled facts injected per turn |
+| `dialogWidth` | `OPENCODE_MEMORY_DIALOG_WIDTH` | `"80%"` | Width of the centered `/memory` TUI modal (`"80%"` or column count like `120`; also respects `OPENCODE_DIALOG_WIDTH`) |
 
 ## License
 

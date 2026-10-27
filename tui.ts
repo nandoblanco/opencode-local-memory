@@ -153,10 +153,61 @@ async function loadTuiRenderer() {
     const [statusMsg, setStatusMsg] = createSignal("");
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let rootRef: any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let listScrollRef: any;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let previewScrollRef: any;
     let searchSeq = 0;
+
+    const resolveDialogWidth = (): string | number => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const opts = (props.context as any)?.options;
+      const raw =
+        opts?.dialogWidth ??
+        opts?.width ??
+        process.env.OPENCODE_MEMORY_DIALOG_WIDTH ??
+        process.env.OPENCODE_DIALOG_WIDTH ??
+        "80%";
+      if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+        return raw <= 100 ? `${Math.round(raw)}%` : Math.round(raw);
+      }
+      if (typeof raw === "string") {
+        const trimmed = raw.trim();
+        if (/^\d+(\.\d+)?%$/.test(trimmed)) return trimmed;
+        const num = Number(trimmed);
+        if (Number.isFinite(num) && num > 0) {
+          return num <= 100 ? `${Math.round(num)}%` : Math.round(num);
+        }
+      }
+      return "80%";
+    };
+
+    const applyDialogWidth = () => {
+      if (!rootRef) return;
+      try {
+        const targetWidth = resolveDialogWidth();
+        let cursor = rootRef;
+        let dialogBox = rootRef;
+        while (cursor.parent && cursor.parent._positionType !== "absolute") {
+          cursor = cursor.parent;
+          dialogBox = cursor;
+        }
+        dialogBox.width = targetWidth;
+        dialogBox.maxWidth = targetWidth;
+        dialogBox.minWidth = 76;
+
+        let inner = rootRef;
+        while (inner && inner !== dialogBox) {
+          inner.width = "100%";
+          inner.maxWidth = "100%";
+          inner = inner.parent;
+        }
+        rootRef.requestRender?.();
+      } catch {
+        // ignore layout mutation errors
+      }
+    };
 
     const theme = () => props.context.theme.surface("dialog");
 
@@ -483,6 +534,8 @@ async function loadTuiRenderer() {
     };
 
     onMount(() => {
+      applyDialogWidth();
+      queueMicrotask(applyDialogWidth);
       props.context.renderer.keyInput.prependListener("keypress", handleKeyPress);
       void reloadVectors(false);
     });
@@ -537,6 +590,10 @@ async function loadTuiRenderer() {
     return el(
       "box",
       {
+        ref: (r: unknown) => {
+          rootRef = r;
+          queueMicrotask(applyDialogWidth);
+        },
         width: "100%",
         height: 28,
         flexDirection: "column",
@@ -953,7 +1010,7 @@ async function openFallbackSelectDialog(
 }
 
 export default {
-  id: "local-memory",
+  id: "opencode-local-memory",
   async setup(context: TuiPluginContext) {
     if (!context?.ui) {
       return;
@@ -970,10 +1027,6 @@ export default {
       }
 
       try {
-        context.ui.dialog.set({
-          size: "xlarge",
-          centered: true,
-        });
         context.ui.dialog.show(() =>
           renderDialog({
             context,
@@ -982,6 +1035,10 @@ export default {
             close: () => context.ui.dialog.clear(),
           })
         );
+        context.ui.dialog.set({
+          size: "xlarge",
+          centered: true,
+        });
       } catch {
         await openFallbackSelectDialog(context, rootDir, initialQuery);
       }
@@ -1035,7 +1092,8 @@ export default {
                 arguments: true,
               },
               run: (input) => {
-                void openMemoryPopup(input?.arguments);
+                const rawArgs = typeof input === "string" ? input : (input as any)?.arguments;
+                void openMemoryPopup(rawArgs);
               },
             },
             {
@@ -1050,7 +1108,8 @@ export default {
                 arguments: true,
               },
               run: (input) => {
-                void quickStoreFromSlash(input?.arguments);
+                const rawArgs = typeof input === "string" ? input : (input as any)?.arguments;
+                void quickStoreFromSlash(rawArgs);
               },
             },
           ],

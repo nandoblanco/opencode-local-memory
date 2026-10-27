@@ -194,7 +194,7 @@ async function getEmbedder() {
       const mod = await import("@xenova/transformers");
       pipelineFn = mod.pipeline;
     } catch {
-      const fallbackPath = path.resolve(__dirname, "../bin/node_modules/@xenova/transformers/src/transformers.js");
+      const fallbackPath = path.resolve(__dirname, "node_modules/@xenova/transformers/src/transformers.js");
       const fallbackUrl = new URL("file:///" + fallbackPath.replace(/\\/g, "/")).href;
       const mod = await import(fallbackUrl);
       pipelineFn = mod.pipeline;
@@ -391,7 +391,7 @@ function dotProduct(a, b) {
 async function searchMemory(rootDir, query, mode, topN) {
   const cleanQuery = String(query || "").trim();
   if (!cleanQuery) return [];
-  const limit = Number(topN) || 6;
+  const limit = Number(topN) || 8;
   const searchMode = mode || "hybrid";
 
   let entries = loadCachedVectors(rootDir);
@@ -590,7 +590,7 @@ function extractLastUserText(messages) {
 
 function createPluginDefinition() {
   return {
-    id: "local-memory",
+    id: "opencode-local-memory",
     async setup(ctx) {
       const options = (ctx && ctx.options) || {};
       const rootDir = resolveMemoryDir(options.directory);

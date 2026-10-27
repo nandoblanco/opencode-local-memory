@@ -15,7 +15,7 @@
   "files": [
     "index.js",
     "tui.ts",
-    "assets/screenshot.svg",
+    "assets/screenshot.png",
     "README.md",
     "LICENSE"
   ],
@@ -33,6 +33,7 @@
     "persistent-memory",
     "embeddings",
     "local-first",
+    "zero-token",
     "tui",
     "transformers"
   ],
