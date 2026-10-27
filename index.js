@@ -69,7 +69,7 @@ function addPluginToJsoncFile(filePath, schemaUrl, pluginEntryStr, pkgName) {
   }
 
   const raw = fs.readFileSync(filePath, "utf8");
-  if (raw.includes('"' + pkgName + '"')) {
+  if (raw.includes(pkgName)) {
     return "already-present";
   }
 
@@ -106,7 +106,8 @@ async function installPlugin(options) {
   const opts = options || {};
   const configDir = resolveConfigDir(opts.configDir);
   const rootDir = resolveMemoryDir(opts.directory);
-  const pkgName = "opencode-local-memory";
+  const pkgName = "@nandoblanco/opencode-local-memory";
+  const matchKey = "opencode-local-memory";
 
   if (!fs.existsSync(configDir)) {
     fs.mkdirSync(configDir, { recursive: true });
@@ -122,8 +123,8 @@ async function installPlugin(options) {
     : JSON.stringify(pkgName);
   const cliEntryStr = JSON.stringify(pkgName);
 
-  const serverStatus = addPluginToJsoncFile(serverConfigFile, "https://" + cliName + ".ai/config.json", serverEntryStr, pkgName);
-  const cliStatus = addPluginToJsoncFile(cliConfigFile, "https://" + cliName + ".ai/v2/cli.json", cliEntryStr, pkgName);
+  const serverStatus = addPluginToJsoncFile(serverConfigFile, "https://" + cliName + ".ai/config.json", serverEntryStr, matchKey);
+  const cliStatus = addPluginToJsoncFile(cliConfigFile, "https://" + cliName + ".ai/v2/cli.json", cliEntryStr, matchKey);
 
   ensureMemoryLayout(rootDir);
   const syncResult = opts.skipSync ? { total: 0, embedded: 0, reused: 0, vecFile: path.join(rootDir, "vectors.json") } : await syncVectors(rootDir);

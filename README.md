@@ -34,32 +34,32 @@ This plugin started as a folder of markdown files and CLI scripts wired together
 Run the built-in installer to automatically register the server and TUI plugins in `~/.config/opencode/opencode.jsonc` and `~/.config/opencode/cli.json` (preserving existing comments and settings), create `~/.config/opencode/memory`, and pre-warm the local embedding model:
 
 ```sh
-npx opencode-local-memory install
+npx @nandoblanco/opencode-local-memory install
 ```
 
 Or specify a custom memory folder:
 
 ```sh
-npx opencode-local-memory install --dir ~/my-memory
+npx @nandoblanco/opencode-local-memory install --dir ~/my-memory
 ```
 
 You can also install directly with OpenCode's native plugin CLI (because `package.json` exports both `.` and `./tui`, OpenCode loads both the server plugin and TUI popup automatically):
 
 ```sh
-opencode plugin add opencode-local-memory
+opencode plugin add @nandoblanco/opencode-local-memory
 # or directly from GitHub:
 opencode plugin add github:nandoblanco/opencode-local-memory
 ```
 
 ### Option 2: Manual Configuration
 
-Add `opencode-local-memory` to `~/.config/opencode/opencode.jsonc` and `~/.config/opencode/cli.json`:
+Add `@nandoblanco/opencode-local-memory` to `~/.config/opencode/opencode.jsonc` and `~/.config/opencode/cli.json`:
 
 ```jsonc
 {
 	"plugins": [
 		{
-			"package": "opencode-local-memory",
+			"package": "@nandoblanco/opencode-local-memory",
 			"options": {
 				"directory": "~/.config/opencode/memory",
 				"minScore": 0.38,
@@ -161,7 +161,7 @@ Before each model turn, the server plugin's `ctx.session.hook("context")` handle
 
 ### 3. How Topic Files & IDs Are Created (`memory_store` & `storeMemoryFact`)
 
-When a storage trigger fires (or when you run `/memory-add` or `npx opencode-local-memory store`), `storeMemoryFact(rootDir, input)` executes an atomic write-and-embed pipeline:
+When a storage trigger fires (or when you run `/memory-add` or `npx @nandoblanco/opencode-local-memory store`), `storeMemoryFact(rootDir, input)` executes an atomic write-and-embed pipeline:
 
 1. **Choosing an existing vs. new topic**: The model checks the injected `Available topics` list. If the fact matches an existing category (`preferences`, `decisions`, `environment`, `agent-behavior`), it passes that slug. If the fact belongs to a new domain (for example, `tools`, `sql`, or `frontend-css-patterns`), it passes a new kebab-case slug.
 2. **Automatic topic file creation**: Normalizes the slug via `.toLowerCase().replace(/[^a-z0-9-_]/g, "-")`. If `topics/<slug>.md` does not exist yet, the plugin creates it with a `# <Slug>` heading and appends `- \`topics/<slug>.md\` - <slug> entries` to `memory.md`.
@@ -229,7 +229,7 @@ Local embedding, TUI browsing, and direct `/memory-add` storage use zero LLM tok
 | Interactive `/memory` TUI modal (`Ctrl+M`) | **0 tokens** | Reads `vectors.json` and `sessions/*.md` directly from disk and runs `Xenova/all-MiniLM-L6-v2` locally on CPU without an LLM request |
 | Direct TUI fact storage (`/memory-add`) | **0 tokens** | Parses `<topic> \| <tags> \| <fact>`, appends to `topics/<topic>.md`, and updates `vectors.json` locally in Node.js |
 | Automatic compaction checkpoint (`compaction` hook) | **0 extra turn tokens** | Captures the existing compaction summary event and indexes it locally into `sessions/*.md` and `vectors.json` |
-| Standalone CLI (`npx opencode-local-memory ...`) | **0 tokens** | Runs directly in Node.js outside the model turn |
+| Standalone CLI (`npx @nandoblanco/opencode-local-memory ...`) | **0 tokens** | Runs directly in Node.js outside the model turn |
 | Per-turn auto-recall (`context` hook) & agent tools | **~250-450 system/schema tokens** | Injects compact instructions plus top matching facts (`score >= 0.38`, max `topK = 6`) into `event.system` and registers `memory_store`, `memory_search`, and `memory_checkpoint` |
 
 ## Directory Structure
@@ -261,19 +261,19 @@ Each entry in `topics/<topic>.md` uses a clean, human-editable block format:
 
 ```sh
 # One-command setup: updates opencode.jsonc + cli.json, scaffolds memory/, and warms vectors.json
-npx opencode-local-memory install [--dir /path/to/memory]
+npx @nandoblanco/opencode-local-memory install [--dir /path/to/memory]
 
 # Incrementally sync topics/*.md and sessions/*.md into vectors.json
-npx opencode-local-memory sync
+npx @nandoblanco/opencode-local-memory sync
 
 # Hybrid, semantic, or exact keyword search
-npx opencode-local-memory search "query" [hybrid|semantic|grep] [topN]
+npx @nandoblanco/opencode-local-memory search "query" [hybrid|semantic|grep] [topN]
 
 # Exact keyword grep
-npx opencode-local-memory recall "exact keyword"
+npx @nandoblanco/opencode-local-memory recall "exact keyword"
 
 # Store a new fact from the command line
-npx opencode-local-memory store decisions "arch, api" "Use REST endpoints for batch exports."
+npx @nandoblanco/opencode-local-memory store decisions "arch, api" "Use REST endpoints for batch exports."
 ```
 
 ## Configuration Options
@@ -284,7 +284,7 @@ Options can be passed in `~/.config/opencode/opencode.jsonc` and `~/.config/open
 {
 	"plugins": [
 		{
-			"package": "opencode-local-memory",
+			"package": "@nandoblanco/opencode-local-memory",
 			"options": {
 				"directory": "~/.config/opencode/memory",
 				"minScore": 0.38,

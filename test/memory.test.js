@@ -80,10 +80,10 @@ describe("ensureMemoryLayout & resolveMemoryDir", () => {
       const updatedJsonc = fs.readFileSync(jsoncPath, "utf8");
       assert.ok(updatedJsonc.includes("// Keep this user comment"));
       assert.ok(updatedJsonc.includes('"opencode-local-search"'));
-      assert.ok(updatedJsonc.includes('"opencode-local-memory"'));
+      assert.ok(updatedJsonc.includes('"@nandoblanco/opencode-local-memory"'));
 
       const cliJson = fs.readFileSync(path.join(cfgDir, "cli.json"), "utf8");
-      assert.ok(cliJson.includes('"opencode-local-memory"'));
+      assert.ok(cliJson.includes('"@nandoblanco/opencode-local-memory"'));
       assert.ok(fs.existsSync(path.join(memDir, "memory.md")));
 
       const second = await installPlugin({ configDir: cfgDir, directory: memDir, skipSync: true });
