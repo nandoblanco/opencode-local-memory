@@ -10,7 +10,7 @@
     "./tui": "./tui.ts"
   },
   "bin": {
-    "opencode-local-memory": "./index.js"
+    "opencode-local-memory": "index.js"
   },
   "files": [
     "index.js",
@@ -62,5 +62,8 @@
   },
   "author": "nandoblanco",
   "license": "MIT",
-  "repository": "github:nandoblanco/opencode-local-memory"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nandoblanco/opencode-local-memory.git"
+  }
 }
