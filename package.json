@@ -1,7 +1,7 @@
 {
   "name": "opencode-local-memory",
   "version": "1.0.0",
-  "description": "Local-first persistent memory plugin for OpenCode with automatic semantic recall, atomic storage, session compaction checkpoints, and a zero-token interactive TUI popup.",
+  "description": "Local-first, automatic persistent memory plugin for OpenCode with per-turn semantic recall, atomic fact storage, session compaction checkpoints, and a zero-token /memory TUI popup.",
   "type": "module",
   "main": "./index.js",
   "exports": {

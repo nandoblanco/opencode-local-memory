@@ -1,6 +1,6 @@
 # opencode-local-memory
 
-Local-first, zero-token persistent memory plugin for OpenCode with automatic per-turn semantic recall, atomic fact storage, session compaction checkpoints, and a configurable split-pane `/memory` TUI popup.
+**Local-first, automatic persistent memory plugin for OpenCode**: recalls relevant facts and session summaries automatically on every turn, stores new decisions and preferences as plain local markdown with local CPU embeddings, checkpoints session compactions automatically, and includes a zero-token `/memory` TUI popup.
 
 ![opencode-local-memory TUI preview](./assets/screenshot.png)
 

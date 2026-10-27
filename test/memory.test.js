@@ -65,7 +65,7 @@ describe("ensureMemoryLayout & resolveMemoryDir", () => {
           "  // Keep this user comment",
           '  "model": "anthropic/claude-sonnet-4-5",',
           '  "plugins": [',
-          '    "opencode-session-search"',
+          '    "opencode-local-search"',
           "  ]",
           "}",
           "",
@@ -79,7 +79,7 @@ describe("ensureMemoryLayout & resolveMemoryDir", () => {
 
       const updatedJsonc = fs.readFileSync(jsoncPath, "utf8");
       assert.ok(updatedJsonc.includes("// Keep this user comment"));
-      assert.ok(updatedJsonc.includes('"opencode-session-search"'));
+      assert.ok(updatedJsonc.includes('"opencode-local-search"'));
       assert.ok(updatedJsonc.includes('"opencode-local-memory"'));
 
       const cliJson = fs.readFileSync(path.join(cfgDir, "cli.json"), "utf8");
