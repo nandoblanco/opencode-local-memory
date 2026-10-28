@@ -716,99 +716,142 @@ function createTuiRenderer() {
           queueMicrotask(applyDialogWidth);
         },
         width: "100%",
-        height: 28,
+        height: 34,
         flexDirection: "column",
         backgroundColor: () => theme().background.base,
+        paddingLeft: 2,
+        paddingRight: 2,
+        paddingTop: 1,
+        paddingBottom: 1,
+        gap: 1,
       },
-      // 1. Header Bar
+      // 1. Header Bar (single-line, no wrapping)
       el(
         "box",
         {
           flexDirection: "row",
           justifyContent: "space-between",
           alignItems: "center",
-          paddingX: 2,
-          paddingTop: 1,
+          border: ["bottom"],
+          borderColor: () => theme().border.base,
+          paddingBottom: 0,
           flexShrink: 0,
+          width: "100%",
         },
         el(
           "box",
-          { flexDirection: "row", gap: 2, alignItems: "center" },
+          { flexDirection: "row", gap: 2, alignItems: "center", flexShrink: 0 },
           el(
             "text",
             {
-              fg: () => theme().text.base,
+              wrapMode: "none",
+              flexShrink: 0,
+              fg: () => theme().text.action.primary.base,
               attributes: TextAttributes.BOLD,
             },
-            "Local Memory Search"
+            "opencode / memory"
           ),
           el(
             "text",
-            { fg: () => theme().text.muted },
-            () =>
-              statusMsg() ||
-              `${hits().length} of ${allEntries().length} entries`
+            {
+              wrapMode: "none",
+              flexShrink: 0,
+              fg: () => theme().text.muted,
+            },
+            () => props.context.ui.format.path(props.rootDir)
           )
         ),
         el(
-          "box",
-          { flexDirection: "row", gap: 2, alignItems: "center" },
-          el(
-            "text",
-            { fg: () => theme().text.muted },
-            () => props.context.ui.format.path(props.rootDir)
-          ),
-          el(
-            "box",
-            { paddingX: 1, onMouseUp: () => props.close() },
-            el("text", { fg: () => theme().text.muted }, "esc")
-          )
+          "text",
+          {
+            wrapMode: "none",
+            flexShrink: 0,
+            fg: () => theme().text.muted,
+          },
+          "[↑↓] select  [Tab] pane  [^D] delete  [Esc] close"
         )
       ),
 
-      // 2. Search Input + Filter Pills
+      // 2. Boxed Filter + Pills Card
       el(
         "box",
         {
           flexDirection: "column",
-          paddingX: 2,
-          paddingY: 1,
-          gap: 1,
+          backgroundColor: () =>
+            theme().background.raised?.base ?? theme().background.base,
+          border: true,
+          borderColor: () =>
+            focusPane() === "search"
+              ? theme().text.action.primary.base
+              : theme().border.base,
+          paddingLeft: 2,
+          paddingRight: 2,
+          paddingTop: 0,
+          paddingBottom: 0,
+          gap: 0,
           flexShrink: 0,
-          border: ["bottom"],
-          borderColor: () => theme().border.base,
+          width: "100%",
         },
         el(
           "box",
-          { flexDirection: "row", alignItems: "center", gap: 1 },
+          {
+            flexDirection: "row",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 1,
+            width: "100%",
+          },
           el(
             "text",
             {
-              fg: () =>
-                focusPane() === "search"
-                  ? theme().text.action.primary.base
-                  : theme().text.muted,
+              width: 7,
+              wrapMode: "none",
+              flexShrink: 0,
+              fg: () => theme().text.action.primary.base,
               attributes: TextAttributes.BOLD,
             },
-            "›"
+            "Filter:"
           ),
-          el("input", {
-            id: "local-memory-search-input",
-            flexGrow: 1,
-            value: () => query(),
-            focused: () => focusPane() === "search",
-            maxLength: Number.POSITIVE_INFINITY,
-            placeholder:
-              "Search local memories (semantic + keyword, or /regex/i)... 0 tokens",
-            placeholderColor: () => theme().text.muted,
-            textColor: () => theme().text.base,
-            focusedTextColor: () => theme().text.formfield.focused,
-            cursorColor: () => theme().text.formfield.focused,
-            backgroundColor: () => theme().background.base,
-            focusedBackgroundColor: () => theme().background.formfield.focused,
-            onMouseDown: () => setFocusPane("search"),
-            onInput: (val: string) => setQuery(val),
-          })
+          el(
+            "box",
+            {
+              flexGrow: 1,
+              flexShrink: 1,
+              minWidth: 0,
+            },
+            el("input", {
+              id: "local-memory-search-input",
+              width: "100%",
+              value: () => query(),
+              focused: () => focusPane() === "search",
+              maxLength: Number.POSITIVE_INFINITY,
+              placeholder:
+                "Search memories (semantic + keyword, topic:name, project:slug, /regex/i)...",
+              placeholderColor: () => theme().text.muted,
+              textColor: () => theme().text.base,
+              focusedTextColor: () => theme().text.formfield.focused,
+              cursorColor: () => theme().text.formfield.focused,
+              backgroundColor: () =>
+                theme().background.raised?.base ?? theme().background.base,
+              focusedBackgroundColor: () =>
+                theme().background.raised?.base ?? theme().background.base,
+              onMouseDown: () => setFocusPane("search"),
+              onInput: (val: string) => setQuery(val),
+            })
+          ),
+          el(
+            "text",
+            {
+              wrapMode: "none",
+              flexShrink: 0,
+              fg: () =>
+                theme().text.feedback?.success?.base ??
+                theme().text.action.primary.base,
+            },
+            () =>
+              statusMsg() ||
+              `${hits().length} of ${allEntries().length} entries · 0 tokens`
+          )
         ),
         el(
           "box",
@@ -836,263 +879,343 @@ function createTuiRenderer() {
             shortcut: "^b",
             active: () => false,
             onClick: () => void runImportInDialog(),
+          }),
+          Pill({
+            label: () => "resync",
+            shortcut: "^l",
+            active: () => false,
+            onClick: () => void reloadVectors(true),
           })
         )
       ),
 
-      // 3. Split-Pane Body
+      // 3. Split-Pane Body: Two Side-by-Side Bordered Cards
       el(
         "box",
-        { flexDirection: "row", flexGrow: 1, minHeight: 0 },
-        // Left: Results List (44%)
+        { flexDirection: "row", gap: 2, flexGrow: 1, minHeight: 0, width: "100%" },
+        // Left Card: Results List (44%)
         el(
-          "scrollbox",
+          "box",
           {
-            id: "local-memory-list",
-            ref: (r: unknown) => {
-              listScrollRef = r;
-            },
             width: "44%",
             height: "100%",
+            flexDirection: "column",
             flexShrink: 0,
-            border: ["right"],
+            backgroundColor: () =>
+              theme().background.raised?.base ?? theme().background.base,
+            border: true,
             borderColor: () =>
-              focusPane() === "list" ? theme().text.base : theme().border.base,
-            scrollbarOptions: { visible: false },
+              focusPane() === "list"
+                ? theme().text.action.primary.base
+                : theme().border.base,
+            paddingLeft: 1,
+            paddingRight: 1,
+            paddingTop: 0,
+            paddingBottom: 0,
             onMouseDown: () => setFocusPane("list"),
           },
-          createComponent(Show, {
-            get when() {
-              return hits().length > 0;
+          el(
+            "box",
+            {
+              flexDirection: "row",
+              justifyContent: "space-between",
+              border: ["bottom"],
+              borderColor: () => theme().border.base,
+              paddingX: 1,
+              flexShrink: 0,
             },
-            get fallback() {
-              return el(
-                "box",
-                { paddingX: 2, paddingY: 1 },
-                el(
-                  "text",
-                  { fg: () => theme().text.muted },
-                  "No matching memory entries found."
-                )
-              );
+            el(
+              "text",
+              {
+                fg: () => theme().text.action.primary.base,
+                attributes: TextAttributes.BOLD,
+              },
+              "◈ MEMORY ENTRIES"
+            ),
+            el(
+              "text",
+              { fg: () => theme().text.muted },
+              () => `${mode()} · ${typeFilter()}`
+            )
+          ),
+          el(
+            "scrollbox",
+            {
+              id: "local-memory-list",
+              ref: (r: unknown) => {
+                listScrollRef = r;
+              },
+              width: "100%",
+              flexGrow: 1,
+              minHeight: 0,
+              scrollbarOptions: { visible: false },
             },
-            get children() {
-              return createComponent(For, {
-                get each() {
-                  return hits();
-                },
-                children: (item: MemoryHit, idx: () => number) => {
-                  const isSelected = () => selectedIndex() === idx();
-                  return el(
-                    "box",
-                    {
-                      id: () => `memory-row-${idx()}`,
-                      flexDirection: "column",
-                      paddingX: 1,
-                      paddingY: 0,
-                      marginBottom: 1,
-                      flexShrink: 0,
-                      backgroundColor: () =>
-                        isSelected()
-                          ? theme().background.action.primary.focused
-                          : undefined,
-                      onMouseUp: () => setSelectedIndex(idx()),
-                      onMouseOver: () => setSelectedIndex(idx()),
-                    },
-                    el(
+            createComponent(Show, {
+              get when() {
+                return hits().length > 0;
+              },
+              get fallback() {
+                return el(
+                  "box",
+                  { paddingX: 1, paddingY: 1 },
+                  el(
+                    "text",
+                    { fg: () => theme().text.muted },
+                    "No matching memory entries found."
+                  )
+                );
+              },
+              get children() {
+                return createComponent(For, {
+                  get each() {
+                    return hits();
+                  },
+                  children: (item: MemoryHit, idx: () => number) => {
+                    const isSelected = () => selectedIndex() === idx();
+                    return el(
                       "box",
                       {
-                        flexDirection: "row",
-                        justifyContent: "space-between",
-                        width: "100%",
+                        id: () => `memory-row-${idx()}`,
+                        flexDirection: "column",
+                        paddingX: 1,
+                        paddingY: 0,
+                        marginBottom: 1,
+                        flexShrink: 0,
+                        backgroundColor: () =>
+                          isSelected()
+                            ? theme().background.action.primary.focused
+                            : undefined,
+                        onMouseUp: () => setSelectedIndex(idx()),
+                        onMouseOver: () => setSelectedIndex(idx()),
                       },
                       el(
-                        "text",
+                        "box",
                         {
-                          wrapMode: "none",
-                          fg: () =>
-                            isSelected()
-                              ? theme().text.action.primary.focused
-                              : theme().text.base,
-                          attributes: () =>
-                            isSelected() ? TextAttributes.BOLD : undefined,
+                          flexDirection: "row",
+                          justifyContent: "space-between",
+                          width: "100%",
                         },
-                        () => `${isSelected() ? "› " : "  "}[${item.entry.id}]`
+                        el(
+                          "text",
+                          {
+                            wrapMode: "none",
+                            truncate: true,
+                            fg: () =>
+                              isSelected()
+                                ? theme().text.action.primary.focused
+                                : theme().text.base,
+                            attributes: () =>
+                              isSelected() ? TextAttributes.BOLD : undefined,
+                          },
+                          () => `${isSelected() ? "▸ " : "  "}[${item.entry.id}]`
+                        ),
+                        el(
+                          "text",
+                          {
+                            wrapMode: "none",
+                            fg: () =>
+                              isSelected()
+                                ? theme().text.action.primary.focused
+                                : theme().text.action.primary.base,
+                          },
+                          () =>
+                            query().trim()
+                              ? `${item.score.toFixed(2)} · ${item.entry.file.replace(/\.md$/, "")}`
+                              : item.entry.file.replace(/\.md$/, "")
+                        )
                       ),
                       el(
                         "text",
                         {
                           wrapMode: "none",
+                          truncate: true,
                           fg: () =>
                             isSelected()
                               ? theme().text.action.primary.focused
                               : theme().text.muted,
                         },
-                        () =>
-                          query().trim()
-                            ? `${item.score.toFixed(2)} · ${item.entry.file.replace(/\.md$/, "")}`
-                            : item.entry.file.replace(/\.md$/, "")
-                      )
-                    ),
-                    el(
-                      "text",
-                      {
-                        wrapMode: "none",
-                        fg: () =>
-                          isSelected()
-                            ? theme().text.action.primary.focused
-                            : theme().text.muted,
-                      },
-                      () => `  ${item.entry.fact.slice(0, 56)}`
-                    )
-                  );
-                },
-              });
-            },
-          })
-        ),
-
-        // Right: Full Memory Entry Preview (56%)
-        el(
-          "scrollbox",
-          {
-            id: "local-memory-preview",
-            ref: (r: unknown) => {
-              previewScrollRef = r;
-            },
-            flexGrow: 1,
-            minWidth: 0,
-            minHeight: 0,
-            paddingX: 2,
-            paddingY: 1,
-            focused: () => focusPane() === "preview",
-            onMouseDown: () => setFocusPane("preview"),
-          },
-          createComponent(Show, {
-            get when() {
-              return selectedHit();
-            },
-            get fallback() {
-              return el(
-                "text",
-                { fg: () => theme().text.muted },
-                "Select a memory entry on the left to inspect it."
-              );
-            },
-            get children() {
-              return el(
-                "box",
-                { flexDirection: "column", gap: 1 },
-                el(
-                  "text",
-                  {
-                    fg: () => theme().text.base,
-                    attributes: TextAttributes.BOLD,
-                  },
-                  () => `[${selectedHit()?.entry.id ?? ""}]`
-                ),
-                el(
-                  "text",
-                  { fg: () => theme().text.muted, wrapMode: "word" },
-                  () => {
-                    const h = selectedHit();
-                    if (!h) return "";
-                    const scope = h.entry.project || "global";
-                    const coreLabel = h.entry.core ? " · Core: pinned" : "";
-                    return `File: ${h.entry.file} · Date: ${h.entry.date || "N/A"} · Scope: ${scope}${coreLabel} · Score: ${h.score.toFixed(3)}`;
-                  }
-                ),
-                el(
-                  "text",
-                  { fg: () => theme().text.muted, wrapMode: "word" },
-                  () => `Tags: [${selectedHit()?.entry.tags ?? ""}]`
-                ),
-                el(
-                  "box",
-                  {
-                    flexDirection: "row",
-                    flexWrap: "wrap",
-                    marginTop: 1,
-                  },
-                  createComponent(For, {
-                    get each() {
-                      return splitHighlightedText(
-                        selectedHit()?.entry.fact ?? "",
-                        query()
-                      );
-                    },
-                    children: (seg: { text: string; match: boolean }) =>
-                      el(
-                        "text",
-                        {
-                          fg: () =>
-                            seg.match
-                              ? theme().text.action.primary.base
-                              : theme().text.base,
-                          attributes: () =>
-                            seg.match ? TextAttributes.BOLD : undefined,
-                        },
-                        seg.text
-                      ),
-                  })
-                ),
-                createComponent(Show, {
-                  get when() {
-                    return Boolean(selectedSessionBody());
-                  },
-                  get children() {
-                    return el(
-                      "box",
-                      {
-                        flexDirection: "column",
-                        marginTop: 1,
-                        paddingTop: 1,
-                        border: ["top"],
-                        borderColor: () => theme().border.base,
-                      },
-                      el(
-                        "text",
-                        {
-                          fg: () => theme().text.base,
-                          attributes: TextAttributes.BOLD,
-                        },
-                        "Full Session Checkpoint Markdown:"
-                      ),
-                      el(
-                        "text",
-                        { fg: () => theme().text.muted, wrapMode: "word" },
-                        () => selectedSessionBody()
+                        () => `  ${item.entry.fact.slice(0, 56)}`
                       )
                     );
                   },
-                })
-              );
-            },
-          })
-        )
-      ),
-
-      // 4. Footer Bar
-      el(
-        "box",
-        {
-          flexDirection: "row",
-          justifyContent: "space-between",
-          paddingX: 2,
-          paddingY: 1,
-          flexShrink: 0,
-          border: ["top"],
-          borderColor: () => theme().border.base,
-        },
-        el(
-          "text",
-          { fg: () => theme().text.muted },
-          "enter select · ↑/↓ or ^n/^k move · ^t type · ^g topic · ^r mode · ^b import · ^l resync · tab pane · esc"
+                });
+              },
+            })
+          )
         ),
+
+        // Right Card: Full Memory Entry Preview (56%)
         el(
-          "text",
-          { fg: () => theme().text.muted },
-          "0 tokens (100% local)"
+          "box",
+          {
+            flexGrow: 1,
+            height: "100%",
+            minWidth: 0,
+            minHeight: 0,
+            flexDirection: "column",
+            backgroundColor: () =>
+              theme().background.raised?.base ?? theme().background.base,
+            border: true,
+            borderColor: () =>
+              focusPane() === "preview"
+                ? theme().text.action.primary.base
+                : theme().border.base,
+            paddingLeft: 2,
+            paddingRight: 2,
+            paddingTop: 0,
+            paddingBottom: 1,
+            onMouseDown: () => setFocusPane("preview"),
+          },
+          el(
+            "box",
+            {
+              flexDirection: "row",
+              justifyContent: "space-between",
+              border: ["bottom"],
+              borderColor: () => theme().border.base,
+              marginBottom: 1,
+              flexShrink: 0,
+            },
+            el(
+              "text",
+              {
+                fg: () => theme().text.action.primary.base,
+                attributes: TextAttributes.BOLD,
+              },
+              "◈ ENTRY PREVIEW"
+            ),
+            el(
+              "text",
+              { fg: () => theme().text.muted },
+              () =>
+                selectedHit()
+                  ? `${selectedHit()?.entry.file ?? ""} · score ${selectedHit()?.score.toFixed(3) ?? ""}`
+                  : "no selection"
+            )
+          ),
+          el(
+            "scrollbox",
+            {
+              id: "local-memory-preview",
+              ref: (r: unknown) => {
+                previewScrollRef = r;
+              },
+              flexGrow: 1,
+              minWidth: 0,
+              minHeight: 0,
+              focused: () => focusPane() === "preview",
+            },
+            createComponent(Show, {
+              get when() {
+                return selectedHit();
+              },
+              get fallback() {
+                return el(
+                  "text",
+                  { fg: () => theme().text.muted },
+                  "Select a memory entry on the left to inspect it."
+                );
+              },
+              get children() {
+                return el(
+                  "box",
+                  { flexDirection: "column", gap: 1 },
+                  el(
+                    "box",
+                    {
+                      flexDirection: "column",
+                      paddingLeft: 1,
+                      border: ["left"],
+                      borderColor: () => theme().text.action.primary.base,
+                    },
+                    el(
+                      "text",
+                      {
+                        fg: () => theme().text.base,
+                        attributes: TextAttributes.BOLD,
+                      },
+                      () => `[${selectedHit()?.entry.id ?? ""}]`
+                    ),
+                    el(
+                      "text",
+                      { fg: () => theme().text.muted, wrapMode: "word" },
+                      () => {
+                        const h = selectedHit();
+                        if (!h) return "";
+                        const scope = h.entry.project || "global";
+                        const coreLabel = h.entry.core ? " · Core: pinned" : "";
+                        return `File: ${h.entry.file} · Date: ${h.entry.date || "N/A"} · Scope: ${scope}${coreLabel}`;
+                      }
+                    ),
+                    el(
+                      "text",
+                      { fg: () => theme().text.muted, wrapMode: "word" },
+                      () => `Tags: [${selectedHit()?.entry.tags ?? ""}]`
+                    )
+                  ),
+                  el(
+                    "box",
+                    {
+                      flexDirection: "row",
+                      flexWrap: "wrap",
+                      marginTop: 1,
+                    },
+                    createComponent(For, {
+                      get each() {
+                        return splitHighlightedText(
+                          selectedHit()?.entry.fact ?? "",
+                          query()
+                        );
+                      },
+                      children: (seg: { text: string; match: boolean }) =>
+                        el(
+                          "text",
+                          {
+                            fg: () =>
+                              seg.match
+                                ? theme().text.action.primary.base
+                                : theme().text.base,
+                            attributes: () =>
+                              seg.match ? TextAttributes.BOLD : undefined,
+                          },
+                          seg.text
+                        ),
+                    })
+                  ),
+                  createComponent(Show, {
+                    get when() {
+                      return Boolean(selectedSessionBody());
+                    },
+                    get children() {
+                      return el(
+                        "box",
+                        {
+                          flexDirection: "column",
+                          marginTop: 1,
+                          paddingTop: 1,
+                          border: ["top"],
+                          borderColor: () => theme().border.base,
+                        },
+                        el(
+                          "text",
+                          {
+                            fg: () => theme().text.action.primary.base,
+                            attributes: TextAttributes.BOLD,
+                          },
+                          "◈ FULL SESSION CHECKPOINT MARKDOWN"
+                        ),
+                        el(
+                          "text",
+                          { fg: () => theme().text.muted, wrapMode: "word" },
+                          () => selectedSessionBody()
+                        )
+                      );
+                    },
+                  })
+                );
+              },
+            })
+          )
         )
       )
     );
