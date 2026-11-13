@@ -9,15 +9,18 @@ import {
   computeLexicalScore,
   deleteMemoryEntry,
   ensureMemoryLayout,
+  executeMemoryQuery,
   getCoreMemories,
   getTopicSlugs,
   importExistingMemory,
   installPlugin,
   loadCachedVectors,
   matchesProjectScope,
+  MemoryRpc,
   nextTopicId,
   parseSessionEntries,
   parseTopicEntries,
+  readSessionMarkdown,
   resolveMemoryDir,
   searchMemory,
   server,
@@ -36,6 +39,23 @@ function withTempDir(fn) {
 }
 
 describe("ensureMemoryLayout & resolveMemoryDir", () => {
+  it("matches every entry independently with global and sticky regex flags", async () => {
+    await withTempDir(async (tmpDir) => {
+      fs.writeFileSync(path.join(tmpDir, "vectors.json"), JSON.stringify([1, 2, 3, 4].map(n => ({
+        id: "audit-00" + n,
+        file: "topics/audit.md",
+        tags: "audit",
+        fact: "needle",
+        project: "global",
+        core: false,
+      }))));
+      for (const query of ["/needle/i", "/needle/gi", "/audit/y"]) {
+        const result = await executeMemoryQuery(tmpDir, { query, mode: "regex" });
+        assert.deepEqual(result.hits.map(hit => hit.entry.id), ["audit-001", "audit-002", "audit-003", "audit-004"]);
+      }
+    });
+  });
+
   it("creates starter memory.md, topics/*.md, and sessions/README.md on a blank folder", async () => {
     await withTempDir(async (tmpDir) => {
       ensureMemoryLayout(tmpDir);
@@ -131,6 +151,8 @@ describe("storeMemoryFact, storeSessionCheckpoint, syncVectors, and searchMemory
       assert.equal(first.file, "topics/decisions.md");
       assert.ok(Array.isArray(first.vector));
       assert.equal(first.vector.length, 384);
+      assert.ok(first.vector.every(Number.isFinite));
+      assert.ok(Math.abs(Math.hypot(...first.vector) - 1) < 0.0001);
 
       const customTopic = await storeMemoryFact(tmpDir, {
         topic: "deployment",
@@ -499,6 +521,48 @@ describe("storeMemoryFact, storeSessionCheckpoint, syncVectors, and searchMemory
       const hits = await searchMemory(memDir, "flex-direction column card-cta", "hybrid", 5);
       assert.ok(hits.length >= 1);
       assert.ok(hits[0].entry.id.startsWith("session:"));
+    });
+  });
+
+  it("supports MemoryRpc, executeMemoryQuery, readSessionMarkdown, and unpinning core memories", async () => {
+    await withTempDir(async (tmpDir) => {
+      assert.equal(MemoryRpc.id, "opencode-local-memory");
+      const pinned = await storeMemoryFact(tmpDir, {
+        id: "pref-pin-001",
+        topic: "preferences",
+        tags: "core, ui, desktop",
+        fact: "Use native OpenCode V2 components in Desktop plugins.",
+        core: true,
+      });
+      assert.equal(pinned.core, true);
+      assert.equal(getCoreMemories(tmpDir).length, 1);
+
+      const unpinned = await storeMemoryFact(tmpDir, {
+        id: "pref-pin-001",
+        topic: "preferences",
+        tags: "core, ui, desktop",
+        fact: "Use native OpenCode V2 components in Desktop plugins.",
+        core: false,
+      });
+      assert.equal(unpinned.core, false);
+      assert.equal(getCoreMemories(tmpDir).length, 0);
+
+      const cp = await storeSessionCheckpoint(tmpDir, {
+        slug: "memory-manager",
+        title: "Memory Manager Port",
+        summary: "Added inline add, edit, pin, and delete to TUI and Desktop GUI.",
+      });
+      const md = readSessionMarkdown(tmpDir, "sessions/" + cp.filename);
+      assert.ok(md.includes("# Memory Manager Port"));
+
+      const queryRes = await executeMemoryQuery(tmpDir, {
+        query: "native OpenCode V2",
+        typeFilter: "topics",
+        mode: "hybrid",
+      });
+      assert.equal(queryRes.totalEntries, 2);
+      assert.equal(queryRes.hits.length, 1);
+      assert.equal(queryRes.hits[0].entry.id, "pref-pin-001");
     });
   });
 });

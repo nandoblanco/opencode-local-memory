@@ -6,6 +6,7 @@ import path from "node:path";
 import os from "node:os";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { MemoryRpc } from "./rpc.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -483,15 +484,15 @@ async function getEmbedder() {
   embedderPromise = (async function () {
     let pipelineFn;
     try {
-      const mod = await import("@xenova/transformers");
+      const mod = await import("@huggingface/transformers");
       pipelineFn = mod.pipeline;
     } catch {
-      const fallbackPath = path.resolve(__dirname, "node_modules/@xenova/transformers/src/transformers.js");
+      const fallbackPath = path.resolve(__dirname, "node_modules/@huggingface/transformers/dist/transformers.node.mjs");
       const fallbackUrl = new URL("file:///" + fallbackPath.replace(/\\/g, "/")).href;
       const mod = await import(fallbackUrl);
       pipelineFn = mod.pipeline;
     }
-    return pipelineFn("feature-extraction", "Xenova/all-MiniLM-L6-v2");
+    return pipelineFn("feature-extraction", "Xenova/all-MiniLM-L6-v2", { device: "cpu", dtype: "q8" });
   })().catch(function (err) {
     embedderPromise = null;
     throw err;
@@ -1263,10 +1264,19 @@ async function storeMemoryFact(rootDir, input) {
   const rawTags = Array.isArray(input.tags)
     ? input.tags.map(function (t) { return String(t).trim(); }).filter(Boolean).join(", ")
     : String(input.tags || rawTopic).trim();
-  const tagsList = rawTags.replace(/[\[\]]+/g, "").replace(/[\r\n\s]+/g, " ").trim() || rawTopic;
+  let tagsList = rawTags.replace(/[\[\]]+/g, "").replace(/[\r\n\s]+/g, " ").trim() || rawTopic;
+  if (input.core === false) {
+    tagsList = tagsList
+      .split(",")
+      .map(function (t) { return t.trim(); })
+      .filter(function (t) { return t && t.toLowerCase() !== "core"; })
+      .join(", ") || rawTopic;
+  }
   const cleanFact = String(input.fact || "").replace(/\s+/g, " ").trim();
   const projectScope = normalizeProjectScope(input.project);
-  const isCore = input.core === true || /(?:^|,)\s*core\s*(?:,|$)/i.test(tagsList);
+  const isCore = input.core === false
+    ? false
+    : (input.core === true || /(?:^|,)\s*core\s*(?:,|$)/i.test(tagsList));
 
   const blockLines = [
     "",
@@ -1987,6 +1997,228 @@ function extractLastUserText(messages) {
   return "";
 }
 
+function isSafeSubPath(parentDir, targetPath) {
+  const rel = path.relative(path.resolve(parentDir), path.resolve(targetPath));
+  return Boolean(rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function isSafeRegexPattern(pattern) {
+  if (!pattern || pattern.length > 256) return false;
+  if (/(\([^()]*[+*?][^()]*\))\s*[+*?{]/.test(pattern)) return false;
+  return true;
+}
+
+function readSessionMarkdown(rootDir, relFile) {
+  try {
+    const cleanRel = String(relFile || "").replace(/\\/g, "/");
+    if (!cleanRel.startsWith("sessions/")) return "";
+    const fullPath = path.resolve(rootDir, cleanRel);
+    if (!isSafeSubPath(rootDir, fullPath)) return "";
+    if (fs.existsSync(fullPath)) {
+      return fs.readFileSync(fullPath, "utf8").replace(/\r\n/g, "\n").trim();
+    }
+  } catch {
+    // ignore read error
+  }
+  return "";
+}
+
+function parseInlineMemoryFilters(rawQ, tFilter, topFilter, mFilter, projFilter, coreOnlyFlag) {
+  let effType = tFilter || "all";
+  let effTopic = topFilter || "all";
+  let effMode = mFilter || "hybrid";
+  let effProject = projFilter || "all";
+  let effCoreOnly = Boolean(coreOnlyFlag) || effType === "core";
+  const tokens = String(rawQ || "").trim().split(/\s+/).filter(Boolean);
+  const cleanTokens = [];
+
+  for (const tok of tokens) {
+    const lower = tok.toLowerCase();
+    if (lower === "type:topics" || lower === "type:facts" || lower === "in:topics") {
+      effType = "topics";
+    } else if (lower === "type:sessions" || lower === "in:sessions") {
+      effType = "sessions";
+    } else if (lower === "type:core" || lower === "in:core") {
+      effType = "core";
+      effCoreOnly = true;
+    } else if (lower === "type:all") {
+      effType = "all";
+    } else if (lower === "core:true" || lower === "is:core") {
+      effCoreOnly = true;
+    } else if (lower.startsWith("project:")) {
+      const val = lower.slice(8).trim();
+      if (val) effProject = val;
+    } else if (lower.startsWith("topic:")) {
+      const val = lower.slice(6).trim();
+      if (val) effTopic = val;
+    } else if (lower.startsWith("re:") && tok.length > 3) {
+      effMode = "regex";
+      cleanTokens.push(tok.slice(3));
+    } else {
+      cleanTokens.push(tok);
+    }
+  }
+
+  return {
+    cleanQ: cleanTokens.join(" ").trim(),
+    effType: effType,
+    effTopic: effTopic,
+    effMode: effMode,
+    effProject: effProject,
+    effCoreOnly: effCoreOnly,
+  };
+}
+
+function sanitizeRpcEntry(entry) {
+  const out = {
+    id: String(entry.id || ""),
+    date: String(entry.date || ""),
+    file: String(entry.file || ""),
+    tags: String(entry.tags || ""),
+    fact: String(entry.fact || ""),
+  };
+  if (entry.project) out.project = String(entry.project);
+  if (entry.core) out.core = true;
+  return out;
+}
+
+async function executeMemoryQuery(rootDir, input) {
+  const opts = input || {};
+  const entries = loadCachedVectors(rootDir) || [];
+  const limit = Math.max(1, Math.min(200, Number(opts.limit) || 100));
+  const parsed = parseInlineMemoryFilters(
+    opts.query || "",
+    opts.typeFilter || "all",
+    opts.topicFilter || "all",
+    opts.mode || "hybrid",
+    opts.projectFilter || "all",
+    opts.coreOnly
+  );
+  const q = parsed.cleanQ;
+  const effType = parsed.effType;
+  const effTopic = parsed.effTopic;
+  const effMode = parsed.effMode;
+  const effProject = parsed.effProject;
+  const effCoreOnly = parsed.effCoreOnly;
+
+  let coreCount = 0;
+  let topicsCount = 0;
+  let sessionsCount = 0;
+  const projectSet = new Set(["global"]);
+
+  for (const e of entries) {
+    if (e.core) coreCount++;
+    if (String(e.file || "").startsWith("topics/")) topicsCount++;
+    if (String(e.file || "").startsWith("sessions/")) sessionsCount++;
+    if (e.project && e.project !== "global") projectSet.add(String(e.project));
+  }
+
+  const matchesSubset = function (e) {
+    if (effType === "core" && !e.core) return false;
+    if (effType === "topics" && !String(e.file || "").startsWith("topics/")) return false;
+    if (effType === "sessions" && !String(e.file || "").startsWith("sessions/")) return false;
+    if (effTopic !== "all" && e.file !== "topics/" + effTopic + ".md") return false;
+    if (effCoreOnly && !e.core) return false;
+    if (effProject !== "all" && !matchesProjectScope(e.project, effProject, false)) return false;
+    return true;
+  };
+
+  const subset = entries.filter(matchesSubset);
+  let hits = [];
+
+  if (!q) {
+    const topicPart = subset.filter(function (e) { return !String(e.file || "").startsWith("sessions/"); }).reverse();
+    const sessionPart = subset.filter(function (e) { return String(e.file || "").startsWith("sessions/"); }).reverse();
+    hits = topicPart
+      .concat(sessionPart)
+      .slice(0, limit)
+      .map(function (e) {
+        return { score: 1, semanticScore: 0, entry: sanitizeRpcEntry(e) };
+      });
+  } else if (effMode === "regex" || (q.startsWith("/") && q.lastIndexOf("/") > 0)) {
+    try {
+      const lastSlash = q.startsWith("/") ? q.lastIndexOf("/") : -1;
+      const pattern = lastSlash > 0 ? q.slice(1, lastSlash) : q;
+      if (isSafeRegexPattern(pattern)) {
+        const flags = lastSlash > 0 ? q.slice(lastSlash + 1) || "i" : "i";
+        const re = new RegExp(pattern, flags);
+        hits = subset
+          .filter(function (e) {
+            re.lastIndex = 0;
+            return re.test(e._haystack || (e.id + " " + e.tags + " " + e.fact + " " + e.file));
+          })
+          .slice(0, limit)
+          .map(function (e) {
+            return { score: 1, semanticScore: 0, entry: sanitizeRpcEntry(e) };
+          });
+      }
+    } catch {
+      hits = [];
+    }
+  } else {
+    const lowerQ = q.toLowerCase();
+    const words = lowerQ.split(/\s+/).filter(function (w) { return w.length >= 2; });
+    const lexicalHits = [];
+    for (const e of subset) {
+      const hay = e._haystack || (e.id + " " + e.tags + " " + e.fact + " " + e.file).toLowerCase();
+      let lex = 0;
+      if (hay.includes(lowerQ)) {
+        lex = 0.9;
+      } else if (words.length > 0) {
+        let matched = 0;
+        for (const w of words) {
+          if (hay.includes(w)) matched++;
+        }
+        if (matched > 0) lex = (matched / words.length) * 0.75;
+      }
+      if (lex > 0) {
+        lexicalHits.push({ score: lex, semanticScore: 0, entry: sanitizeRpcEntry(e) });
+      }
+    }
+    lexicalHits.sort(function (a, b) { return b.score - a.score; });
+
+    if (effMode === "hybrid" && q.length >= 2) {
+      try {
+        const semHits = await searchMemory(rootDir, q, "hybrid", limit, {
+          project: effProject,
+          includeGlobal: effProject === "all",
+          coreOnly: effCoreOnly,
+        });
+        const filteredSem = semHits
+          .filter(function (h) {
+            return matchesSubset(h.entry) && h.score >= 0.22;
+          })
+          .slice(0, limit)
+          .map(function (h) {
+            return {
+              score: Number(h.score || 0),
+              semanticScore: Number(h.semanticScore || 0),
+              entry: sanitizeRpcEntry(h.entry),
+            };
+          });
+        hits = filteredSem.length > 0 ? filteredSem : lexicalHits.slice(0, limit);
+      } catch {
+        hits = lexicalHits.slice(0, limit);
+      }
+    } else {
+      hits = lexicalHits.slice(0, limit);
+    }
+  }
+
+  return JSON.parse(
+    JSON.stringify({
+      rootDir: rootDir,
+      totalEntries: entries.length,
+      coreCount: coreCount,
+      topicsCount: topicsCount,
+      sessionsCount: sessionsCount,
+      topics: getTopicSlugs(rootDir) || [],
+      projects: Array.from(projectSet),
+      hits: hits,
+    })
+  );
+}
+
 function createPluginDefinition() {
   return {
     id: "opencode-local-memory",
@@ -2005,6 +2237,75 @@ function createPluginDefinition() {
       });
 
       const registrations = [];
+
+      if (ctx && ctx.rpc && typeof ctx.rpc.register === "function") {
+        const rpcReg = await ctx.rpc.register(MemoryRpc, {
+          async query(input) {
+            return executeMemoryQuery(rootDir, input);
+          },
+          async store(input) {
+            const saved = await storeMemoryFact(rootDir, input);
+            return JSON.parse(
+              JSON.stringify({
+                entry: {
+                  id: String(saved.id || ""),
+                  date: String(saved.date || ""),
+                  file: String(saved.file || ""),
+                  tags: String(saved.tags || ""),
+                  fact: String(saved.fact || ""),
+                  project: String(saved.project || "global"),
+                  core: Boolean(saved.core),
+                  updated: Boolean(saved.updated),
+                  superseded: Array.isArray(saved.superseded) ? saved.superseded : [],
+                },
+              })
+            );
+          },
+          async remove(input) {
+            const res = await deleteMemoryEntry(rootDir, input && input.id);
+            return JSON.parse(
+              JSON.stringify({
+                deleted: Array.isArray(res.deleted) ? res.deleted : [],
+                notFound: Array.isArray(res.notFound) ? res.notFound : [],
+                total: Number(res.total || 0),
+              })
+            );
+          },
+          async sync() {
+            const res = await syncVectors(rootDir);
+            return JSON.parse(
+              JSON.stringify({
+                total: Number(res.total || 0),
+                embedded: Number(res.embedded || 0),
+                reused: Number(res.reused || 0),
+                vecFile: String(res.vecFile || path.join(rootDir, "vectors.json")),
+              })
+            );
+          },
+          async importMemory(input) {
+            const res = await importExistingMemory(rootDir, {
+              limit: input && input.limit ? Number(input.limit) : undefined,
+            });
+            return JSON.parse(
+              JSON.stringify({
+                importedFactsCount: Array.isArray(res.importedFacts) ? res.importedFacts.length : 0,
+                skippedFacts: Number(res.skippedFacts || 0),
+                importedSessionsCount: Array.isArray(res.importedSessions) ? res.importedSessions.length : 0,
+                skippedSessions: Number(res.skippedSessions || 0),
+                total: Number(res.syncResult && res.syncResult.total ? res.syncResult.total : 0),
+              })
+            );
+          },
+          async getSessionMarkdown(input) {
+            const relFile = String((input && input.file) || "");
+            return {
+              file: relFile,
+              markdown: readSessionMarkdown(rootDir, relFile),
+            };
+          },
+        });
+        if (rpcReg) registrations.push(rpcReg);
+      }
 
       if (ctx && ctx.tool && typeof ctx.tool.transform === "function") {
         const toolReg = await ctx.tool.transform(function (editor) {
@@ -2284,6 +2585,7 @@ const server = createPluginDefinition();
 export default server;
 export {
   server,
+  MemoryRpc,
   resolveMemoryDir,
   resolveConfigDir,
   resolveDbPath,
@@ -2307,7 +2609,9 @@ export {
   searchMemory,
   storeMemoryFact,
   deleteMemoryEntry,
-  storeSessionCheckpoint
+  storeSessionCheckpoint,
+  readSessionMarkdown,
+  executeMemoryQuery
 };
 
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
@@ -2397,6 +2701,29 @@ if (isDirectRun) {
       console.log("Stored [" + entry.id + "] in " + entry.file);
     }).catch(function (err) {
       console.error("Store failed:", err);
+      process.exit(1);
+    });
+  } else if (cmd === "store-json") {
+    const payloadIdx = process.argv.indexOf("--payload");
+    const rawPayload = (payloadIdx !== -1 && process.argv[payloadIdx + 1]) ? process.argv[payloadIdx + 1] : "{}";
+    const parsedPayload = JSON.parse(rawPayload);
+    storeMemoryFact(rootDir, parsedPayload).then(function (entry) {
+      const out = Object.assign({}, entry);
+      delete out.vector;
+      delete out._haystack;
+      console.log(JSON.stringify(out));
+    }).catch(function (err) {
+      console.error("Store JSON failed:", err);
+      process.exit(1);
+    });
+  } else if (cmd === "delete-json") {
+    const payloadIdx = process.argv.indexOf("--payload");
+    const rawPayload = (payloadIdx !== -1 && process.argv[payloadIdx + 1]) ? process.argv[payloadIdx + 1] : "{}";
+    const parsedPayload = JSON.parse(rawPayload);
+    deleteMemoryEntry(rootDir, parsedPayload.id).then(function (res) {
+      console.log(JSON.stringify(res));
+    }).catch(function (err) {
+      console.error("Delete JSON failed:", err);
       process.exit(1);
     });
   } else if (cmd === "delete" || cmd === "rm") {

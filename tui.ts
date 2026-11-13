@@ -55,11 +55,13 @@ interface MemoryHit {
   entry: MemoryEntry;
 }
 
-type TypeFilter = "all" | "topics" | "sessions";
+type TypeFilter = "all" | "core" | "topics" | "sessions";
 type ModeFilter = "hybrid" | "keyword" | "regex";
+type EditorField = "topic" | "tags" | "project" | "core" | "fact";
 
-const TYPE_CYCLE: TypeFilter[] = ["all", "topics", "sessions"];
+const TYPE_CYCLE: TypeFilter[] = ["all", "core", "topics", "sessions"];
 const MODE_CYCLE: ModeFilter[] = ["hybrid", "keyword", "regex"];
+const EDITOR_FIELDS: EditorField[] = ["topic", "tags", "project", "core", "fact"];
 const CLI_SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "index.js");
 
 function runCliSubprocess(args: string[]): Promise<string> {
@@ -93,6 +95,48 @@ async function safeImportMemory(rootDir: string, limit?: number) {
     const args = ["import", "--dir", rootDir, "--json"];
     if (limit) args.push("--limit", String(limit));
     const stdout = await runCliSubprocess(args);
+    const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+}
+
+async function safeStoreMemory(
+  rootDir: string,
+  payload: {
+    id?: string;
+    topic: string;
+    tags: string;
+    fact: string;
+    project?: string;
+    core?: boolean;
+  }
+) {
+  try {
+    return await storeMemoryFact(rootDir, payload);
+  } catch {
+    const stdout = await runCliSubprocess([
+      "store-json",
+      "--dir",
+      rootDir,
+      "--payload",
+      JSON.stringify(payload),
+    ]);
+    const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+}
+
+async function safeDeleteMemory(rootDir: string, id: string) {
+  try {
+    return await deleteMemoryEntry(rootDir, id);
+  } catch {
+    const stdout = await runCliSubprocess([
+      "delete-json",
+      "--dir",
+      rootDir,
+      "--payload",
+      JSON.stringify({ id }),
+    ]);
     const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
     return JSON.parse(lines[lines.length - 1]);
   }
@@ -219,6 +263,15 @@ function createTuiRenderer() {
     const [allEntries, setAllEntries] = createSignal<MemoryEntry[]>([]);
     const [hits, setHits] = createSignal<MemoryHit[]>([]);
     const [statusMsg, setStatusMsg] = createSignal("");
+    const [editorMode, setEditorMode] = createSignal<null | "add" | "edit">(null);
+    const [editorField, setEditorField] = createSignal<EditorField>("fact");
+    const [editId, setEditId] = createSignal("");
+    const [editTopic, setEditTopic] = createSignal("preferences");
+    const [editTags, setEditTags] = createSignal("");
+    const [editProject, setEditProject] = createSignal("global");
+    const [editCore, setEditCore] = createSignal(false);
+    const [editFact, setEditFact] = createSignal("");
+    const [confirmDeleteId, setConfirmDeleteId] = createSignal<string | null>(null);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let rootRef: any;
@@ -304,6 +357,9 @@ function createTuiRenderer() {
           effType = "topics";
         } else if (lower === "type:sessions" || lower === "in:sessions") {
           effType = "sessions";
+        } else if (lower === "type:core" || lower === "in:core") {
+          effType = "core";
+          effCoreOnly = true;
         } else if (lower === "type:all") {
           effType = "all";
         } else if (lower === "core:true" || lower === "is:core") {
@@ -320,6 +376,10 @@ function createTuiRenderer() {
         } else {
           cleanTokens.push(tok);
         }
+      }
+
+      if (effType === "core") {
+        effCoreOnly = true;
       }
 
       return {
@@ -347,6 +407,7 @@ function createTuiRenderer() {
       );
 
       const subset = entries.filter((e) => {
+        if (effType === "core" && !e.core) return false;
         if (effType === "topics" && !e.file.startsWith("topics/")) return false;
         if (effType === "sessions" && !e.file.startsWith("sessions/")) return false;
         if (effTopic !== "all" && e.file !== `topics/${effTopic}.md`) return false;
@@ -356,9 +417,10 @@ function createTuiRenderer() {
       });
 
       if (!q) {
-        return subset
-          .slice()
-          .reverse()
+        const topicPart = subset.filter((e) => !e.file.startsWith("sessions/")).reverse();
+        const sessionPart = subset.filter((e) => e.file.startsWith("sessions/")).reverse();
+        return topicPart
+          .concat(sessionPart)
           .map((e) => ({ score: 1, semanticScore: 0, entry: e }));
       }
 
@@ -432,6 +494,7 @@ function createTuiRenderer() {
           });
           if (currentSeq !== searchSeq) return;
           const filtered = semHits.filter((h) => {
+            if (effType === "core" && !h.entry.core) return false;
             if (effType === "topics" && !h.entry.file.startsWith("topics/")) return false;
             if (effType === "sessions" && !h.entry.file.startsWith("sessions/")) return false;
             if (effTopic !== "all" && h.entry.file !== `topics/${effTopic}.md`) return false;
@@ -444,7 +507,7 @@ function createTuiRenderer() {
       }
     };
 
-    const reloadVectors = async (forceSync = false) => {
+    const reloadVectors = async (forceSync = false, selectId?: string) => {
       if (forceSync) {
         setStatusMsg("syncing markdown -> vectors.json...");
         await safeSyncVectors(props.rootDir).catch(() => {});
@@ -453,6 +516,177 @@ function createTuiRenderer() {
       const loaded = (loadCachedVectors(props.rootDir) || []) as MemoryEntry[];
       setAllEntries(loaded);
       await runSearch();
+      if (selectId) {
+        const idx = hits().findIndex((h) => h.entry.id === selectId);
+        if (idx >= 0) {
+          setSelectedIndex(idx);
+          queueMicrotask(() => listScrollRef?.scrollChildIntoView?.(`memory-row-${idx}`));
+        }
+      }
+    };
+
+    const startAdd = () => {
+      setConfirmDeleteId(null);
+      const currentTopic = topicFilter() !== "all" ? topicFilter() : "preferences";
+      setEditId("");
+      setEditTopic(currentTopic);
+      setEditTags(currentTopic);
+      setEditProject("global");
+      setEditCore(typeFilter() === "core");
+      setEditFact("");
+      setEditorField("fact");
+      setEditorMode("add");
+      setFocusPane("preview");
+      setStatusMsg("adding new memory fact (Tab fields · ^S/Enter save · Esc cancel)");
+    };
+
+    const startEdit = () => {
+      setConfirmDeleteId(null);
+      const current = selectedHit();
+      if (!current) return;
+      if (!current.entry.file.startsWith("topics/")) {
+        props.context.ui.toast.show({
+          title: "Session Checkpoints are Read-Only",
+          message: "Select a topic fact (topics/*.md) to edit inline, or press ^N to add a new fact.",
+          variant: "warning",
+        });
+        return;
+      }
+      const topicSlug = current.entry.file.replace(/^topics\//, "").replace(/\.md$/, "");
+      setEditId(current.entry.id);
+      setEditTopic(topicSlug || "preferences");
+      setEditTags(current.entry.tags || "");
+      setEditProject(current.entry.project || "global");
+      setEditCore(Boolean(current.entry.core));
+      setEditFact(current.entry.fact || "");
+      setEditorField("fact");
+      setEditorMode("edit");
+      setFocusPane("preview");
+      setStatusMsg(`editing [${current.entry.id}] (Tab fields · ^S/Enter save · Esc cancel)`);
+    };
+
+    const cancelEditor = () => {
+      setEditorMode(null);
+      setConfirmDeleteId(null);
+      setStatusMsg("");
+    };
+
+    const saveEditor = async () => {
+      const modeVal = editorMode();
+      if (!modeVal) return;
+      const topic = editTopic().trim() || "preferences";
+      const fact = editFact().trim();
+      if (!fact) {
+        props.context.ui.toast.show({
+          title: "Fact Required",
+          message: "Enter a non-empty memory fact before saving.",
+          variant: "warning",
+        });
+        return;
+      }
+      const tags = editTags().trim() || topic;
+      const project = editProject().trim() || "global";
+      const core = Boolean(editCore());
+      const id = modeVal === "edit" ? editId().trim() || undefined : undefined;
+      setStatusMsg(modeVal === "edit" ? `saving [${id}]...` : "storing new memory...");
+      try {
+        const saved = await safeStoreMemory(props.rootDir, {
+          id,
+          topic,
+          tags,
+          fact,
+          project,
+          core,
+        });
+        setEditorMode(null);
+        setStatusMsg("");
+        await reloadVectors(false, saved.id);
+        props.context.ui.toast.show({
+          title: modeVal === "edit" ? `Updated [${saved.id}] (0 tokens)` : `Stored [${saved.id}] (0 tokens)`,
+          message: `${saved.file}: ${saved.fact.slice(0, 90)}`,
+          variant: "success",
+        });
+      } catch (err) {
+        setStatusMsg("");
+        props.context.ui.toast.show({
+          title: "Memory Save Error",
+          message: err instanceof Error ? err.message : String(err),
+          variant: "error",
+        });
+      }
+    };
+
+    const toggleSelectedCore = async () => {
+      setConfirmDeleteId(null);
+      const current = selectedHit();
+      if (!current) return;
+      if (!current.entry.file.startsWith("topics/")) {
+        props.context.ui.toast.show({
+          title: "Topic Facts Only",
+          message: "Only topic facts (topics/*.md) can be pinned as core memories.",
+          variant: "warning",
+        });
+        return;
+      }
+      const topic = current.entry.file.replace(/^topics\//, "").replace(/\.md$/, "");
+      const nextCore = !current.entry.core;
+      setStatusMsg(`${nextCore ? "pinning" : "unpinning"} [${current.entry.id}]...`);
+      try {
+        const saved = await safeStoreMemory(props.rootDir, {
+          id: current.entry.id,
+          topic,
+          tags: current.entry.tags,
+          fact: current.entry.fact,
+          project: current.entry.project || "global",
+          core: nextCore,
+        });
+        setStatusMsg("");
+        await reloadVectors(false, saved.id);
+        props.context.ui.toast.show({
+          title: nextCore ? `Pinned [${saved.id}] as Core` : `Unpinned [${saved.id}]`,
+          message: nextCore
+            ? "Injected automatically on every turn."
+            : "Removed from pinned core memories.",
+          variant: "success",
+        });
+      } catch (err) {
+        setStatusMsg("");
+        props.context.ui.toast.show({
+          title: "Pin Toggle Error",
+          message: err instanceof Error ? err.message : String(err),
+          variant: "error",
+        });
+      }
+    };
+
+    const promptOrConfirmDelete = async () => {
+      const current = selectedHit();
+      if (!current) return;
+      const targetId = current.entry.id;
+      if (confirmDeleteId() !== targetId) {
+        setConfirmDeleteId(targetId);
+        setStatusMsg(`confirm delete [${targetId}]? press ^D or Enter again (Esc cancels)`);
+        return;
+      }
+      setConfirmDeleteId(null);
+      setStatusMsg(`deleting [${targetId}]...`);
+      try {
+        const res = await safeDeleteMemory(props.rootDir, targetId);
+        setStatusMsg("");
+        await reloadVectors(false);
+        props.context.ui.toast.show({
+          title: `Deleted [${targetId}] (0 tokens)`,
+          message: `${res.total} entries remaining in vectors.json`,
+          variant: "success",
+        });
+      } catch (err) {
+        setStatusMsg("");
+        props.context.ui.toast.show({
+          title: "Delete Error",
+          message: err instanceof Error ? err.message : String(err),
+          variant: "error",
+        });
+      }
     };
 
     const runImportInDialog = async () => {
@@ -532,7 +766,40 @@ function createTuiRenderer() {
       if (name === "escape") {
         event.preventDefault();
         event.stopPropagation();
+        if (editorMode()) {
+          cancelEditor();
+          return;
+        }
+        if (confirmDeleteId()) {
+          setConfirmDeleteId(null);
+          setStatusMsg("");
+          return;
+        }
         props.close();
+        return;
+      }
+
+      if (editorMode()) {
+        if (name === "tab") {
+          event.preventDefault();
+          event.stopPropagation();
+          const idx = EDITOR_FIELDS.indexOf(editorField());
+          const next = EDITOR_FIELDS[(idx + (event.shift ? -1 : 1) + EDITOR_FIELDS.length) % EDITOR_FIELDS.length];
+          setEditorField(next);
+          return;
+        }
+        if ((event.ctrl && name === "s") || name === "return" || name === "enter" || name === "kpenter") {
+          event.preventDefault();
+          event.stopPropagation();
+          void saveEditor();
+          return;
+        }
+        if (editorField() === "core" && name === "space") {
+          event.preventDefault();
+          event.stopPropagation();
+          setEditCore((v) => !v);
+          return;
+        }
         return;
       }
 
@@ -564,6 +831,30 @@ function createTuiRenderer() {
         cycleMode();
         return;
       }
+      if (event.ctrl && name === "n") {
+        event.preventDefault();
+        event.stopPropagation();
+        startAdd();
+        return;
+      }
+      if (event.ctrl && name === "e") {
+        event.preventDefault();
+        event.stopPropagation();
+        startEdit();
+        return;
+      }
+      if (event.ctrl && name === "p") {
+        event.preventDefault();
+        event.stopPropagation();
+        void toggleSelectedCore();
+        return;
+      }
+      if (event.ctrl && name === "d") {
+        event.preventDefault();
+        event.stopPropagation();
+        void promptOrConfirmDelete();
+        return;
+      }
       if (event.ctrl && name === "l") {
         event.preventDefault();
         event.stopPropagation();
@@ -577,7 +868,13 @@ function createTuiRenderer() {
         return;
       }
 
-      if (name === "return" || name === "enter") {
+      if (name === "return" || name === "enter" || name === "kpenter") {
+        if (confirmDeleteId()) {
+          event.preventDefault();
+          event.stopPropagation();
+          void promptOrConfirmDelete();
+          return;
+        }
         const current = selectedHit();
         if (current) {
           event.preventDefault();
@@ -606,11 +903,12 @@ function createTuiRenderer() {
 
       if (
         name === "down" ||
-        (event.ctrl && (name === "n" || name === "j")) ||
-        (focusPane() !== "input" && !event.ctrl && name === "j")
+        (event.ctrl && name === "j") ||
+        (focusPane() !== "search" && !event.ctrl && name === "j")
       ) {
         event.preventDefault();
         event.stopPropagation();
+        setConfirmDeleteId(null);
         if (focusPane() === "preview" && !event.ctrl && name === "j") {
           previewScrollRef?.scrollBy?.(2);
         } else {
@@ -620,11 +918,12 @@ function createTuiRenderer() {
       }
       if (
         name === "up" ||
-        (event.ctrl && (name === "p" || name === "k")) ||
-        (focusPane() !== "input" && !event.ctrl && name === "k")
+        (event.ctrl && name === "k") ||
+        (focusPane() !== "search" && !event.ctrl && name === "k")
       ) {
         event.preventDefault();
         event.stopPropagation();
+        setConfirmDeleteId(null);
         if (focusPane() === "preview" && !event.ctrl && name === "k") {
           previewScrollRef?.scrollBy?.(-2);
         } else {
@@ -632,9 +931,10 @@ function createTuiRenderer() {
         }
         return;
       }
-      if (name === "pagedown" || (event.ctrl && name === "d")) {
+      if (name === "pagedown" || (event.ctrl && name === "f")) {
         event.preventDefault();
         event.stopPropagation();
+        setConfirmDeleteId(null);
         if (focusPane() === "preview") {
           previewScrollRef?.scrollBy?.(8);
         } else {
@@ -645,6 +945,7 @@ function createTuiRenderer() {
       if (name === "pageup" || (event.ctrl && name === "u")) {
         event.preventDefault();
         event.stopPropagation();
+        setConfirmDeleteId(null);
         if (focusPane() === "preview") {
           previewScrollRef?.scrollBy?.(-8);
         } else {
@@ -768,7 +1069,7 @@ function createTuiRenderer() {
             flexShrink: 0,
             fg: () => theme().text.muted,
           },
-          "[↑↓] select  [Tab] pane  [^D] delete  [Esc] close"
+          "[↑↓] select  [^N] add  [^E] edit  [^P] pin  [^D] delete  [Esc] close"
         )
       ),
 
@@ -823,7 +1124,7 @@ function createTuiRenderer() {
               id: "local-memory-search-input",
               width: "100%",
               value: () => query(),
-              focused: () => focusPane() === "search",
+              focused: () => !editorMode() && focusPane() === "search",
               maxLength: Number.POSITIVE_INFINITY,
               placeholder:
                 "Search memories (semantic + keyword, topic:name, project:slug, /regex/i)...",
@@ -835,7 +1136,10 @@ function createTuiRenderer() {
                 theme().background.raised?.base ?? theme().background.base,
               focusedBackgroundColor: () =>
                 theme().background.raised?.base ?? theme().background.base,
-              onMouseDown: () => setFocusPane("search"),
+              onMouseDown: () => {
+                setEditorMode(null);
+                setFocusPane("search");
+              },
               onInput: (val: string) => setQuery(val),
             })
           ),
@@ -845,8 +1149,10 @@ function createTuiRenderer() {
               wrapMode: "none",
               flexShrink: 0,
               fg: () =>
-                theme().text.feedback?.success?.base ??
-                theme().text.action.primary.base,
+                confirmDeleteId()
+                  ? theme().text.feedback?.warning?.base ?? theme().text.action.primary.base
+                  : theme().text.feedback?.success?.base ??
+                    theme().text.action.primary.base,
             },
             () =>
               statusMsg() ||
@@ -873,6 +1179,30 @@ function createTuiRenderer() {
             shortcut: "^r",
             active: () => mode() !== "hybrid",
             onClick: cycleMode,
+          }),
+          Pill({
+            label: () => "+ add",
+            shortcut: "^n",
+            active: () => editorMode() === "add",
+            onClick: startAdd,
+          }),
+          Pill({
+            label: () => "edit",
+            shortcut: "^e",
+            active: () => editorMode() === "edit",
+            onClick: startEdit,
+          }),
+          Pill({
+            label: () => (selectedHit()?.entry.core ? "unpin" : "pin core"),
+            shortcut: "^p",
+            active: () => Boolean(selectedHit()?.entry.core),
+            onClick: () => void toggleSelectedCore(),
+          }),
+          Pill({
+            label: () => (confirmDeleteId() ? "confirm del!" : "delete"),
+            shortcut: "^d",
+            active: () => Boolean(confirmDeleteId()),
+            onClick: () => void promptOrConfirmDelete(),
           }),
           Pill({
             label: () => "import",
@@ -1007,7 +1337,8 @@ function createTuiRenderer() {
                             attributes: () =>
                               isSelected() ? TextAttributes.BOLD : undefined,
                           },
-                          () => `${isSelected() ? "▸ " : "  "}[${item.entry.id}]`
+                          () =>
+                            `${isSelected() ? "▸ " : "  "}${item.entry.core ? "★ " : ""}[${item.entry.id}]`
                         ),
                         el(
                           "text",
@@ -1044,7 +1375,7 @@ function createTuiRenderer() {
           )
         ),
 
-        // Right Card: Full Memory Entry Preview (56%)
+        // Right Card: Full Memory Entry Preview or Inline Editor (56%)
         el(
           "box",
           {
@@ -1057,7 +1388,7 @@ function createTuiRenderer() {
               theme().background.raised?.base ?? theme().background.base,
             border: true,
             borderColor: () =>
-              focusPane() === "preview"
+              editorMode() || focusPane() === "preview"
                 ? theme().text.action.primary.base
                 : theme().border.base,
             paddingLeft: 2,
@@ -1082,15 +1413,22 @@ function createTuiRenderer() {
                 fg: () => theme().text.action.primary.base,
                 attributes: TextAttributes.BOLD,
               },
-              "◈ ENTRY PREVIEW"
+              () =>
+                editorMode() === "add"
+                  ? "◈ ADD NEW MEMORY FACT"
+                  : editorMode() === "edit"
+                    ? `◈ EDIT MEMORY [${editId()}]`
+                    : "◈ ENTRY PREVIEW"
             ),
             el(
               "text",
               { fg: () => theme().text.muted },
               () =>
-                selectedHit()
-                  ? `${selectedHit()?.entry.file ?? ""} · score ${selectedHit()?.score.toFixed(3) ?? ""}`
-                  : "no selection"
+                editorMode()
+                  ? "[Tab] next field · [^S/Enter] save · [Esc] cancel"
+                  : selectedHit()
+                    ? `${selectedHit()?.entry.file ?? ""} · score ${selectedHit()?.score.toFixed(3) ?? ""}`
+                    : "no selection"
             )
           ),
           el(
@@ -1103,115 +1441,359 @@ function createTuiRenderer() {
               flexGrow: 1,
               minWidth: 0,
               minHeight: 0,
-              focused: () => focusPane() === "preview",
+              focused: () => !editorMode() && focusPane() === "preview",
             },
             createComponent(Show, {
               get when() {
-                return selectedHit();
+                return Boolean(editorMode());
               },
               get fallback() {
-                return el(
-                  "text",
-                  { fg: () => theme().text.muted },
-                  "Select a memory entry on the left to inspect it."
-                );
-              },
-              get children() {
-                return el(
-                  "box",
-                  { flexDirection: "column", gap: 1 },
-                  el(
-                    "box",
-                    {
-                      flexDirection: "column",
-                      paddingLeft: 1,
-                      border: ["left"],
-                      borderColor: () => theme().text.action.primary.base,
-                    },
-                    el(
+                return createComponent(Show, {
+                  get when() {
+                    return selectedHit();
+                  },
+                  get fallback() {
+                    return el(
                       "text",
-                      {
-                        fg: () => theme().text.base,
-                        attributes: TextAttributes.BOLD,
-                      },
-                      () => `[${selectedHit()?.entry.id ?? ""}]`
-                    ),
-                    el(
-                      "text",
-                      { fg: () => theme().text.muted, wrapMode: "word" },
-                      () => {
-                        const h = selectedHit();
-                        if (!h) return "";
-                        const scope = h.entry.project || "global";
-                        const coreLabel = h.entry.core ? " · Core: pinned" : "";
-                        return `File: ${h.entry.file} · Date: ${h.entry.date || "N/A"} · Scope: ${scope}${coreLabel}`;
-                      }
-                    ),
-                    el(
-                      "text",
-                      { fg: () => theme().text.muted, wrapMode: "word" },
-                      () => `Tags: [${selectedHit()?.entry.tags ?? ""}]`
-                    )
-                  ),
-                  el(
-                    "box",
-                    {
-                      flexDirection: "row",
-                      flexWrap: "wrap",
-                      marginTop: 1,
-                    },
-                    createComponent(For, {
-                      get each() {
-                        return splitHighlightedText(
-                          selectedHit()?.entry.fact ?? "",
-                          query()
-                        );
-                      },
-                      children: (seg: { text: string; match: boolean }) =>
-                        el(
-                          "text",
-                          {
-                            fg: () =>
-                              seg.match
-                                ? theme().text.action.primary.base
-                                : theme().text.base,
-                            attributes: () =>
-                              seg.match ? TextAttributes.BOLD : undefined,
-                          },
-                          seg.text
-                        ),
-                    })
-                  ),
-                  createComponent(Show, {
-                    get when() {
-                      return Boolean(selectedSessionBody());
-                    },
-                    get children() {
-                      return el(
+                      { fg: () => theme().text.muted },
+                      "Select a memory entry on the left to inspect it, or press ^N to add a new memory fact."
+                    );
+                  },
+                  get children() {
+                    return el(
+                      "box",
+                      { flexDirection: "column", gap: 1 },
+                      el(
                         "box",
                         {
                           flexDirection: "column",
-                          marginTop: 1,
-                          paddingTop: 1,
-                          border: ["top"],
-                          borderColor: () => theme().border.base,
+                          paddingLeft: 1,
+                          border: ["left"],
+                          borderColor: () => theme().text.action.primary.base,
                         },
                         el(
                           "text",
                           {
-                            fg: () => theme().text.action.primary.base,
+                            fg: () => theme().text.base,
                             attributes: TextAttributes.BOLD,
                           },
-                          "◈ FULL SESSION CHECKPOINT MARKDOWN"
+                          () =>
+                            `${selectedHit()?.entry.core ? "★ " : ""}[${selectedHit()?.entry.id ?? ""}]`
                         ),
                         el(
                           "text",
                           { fg: () => theme().text.muted, wrapMode: "word" },
-                          () => selectedSessionBody()
+                          () => {
+                            const h = selectedHit();
+                            if (!h) return "";
+                            const scope = h.entry.project || "global";
+                            const coreLabel = h.entry.core ? " · Core: pinned" : "";
+                            return `File: ${h.entry.file} · Date: ${h.entry.date || "N/A"} · Scope: ${scope}${coreLabel}`;
+                          }
+                        ),
+                        el(
+                          "text",
+                          { fg: () => theme().text.muted, wrapMode: "word" },
+                          () => `Tags: [${selectedHit()?.entry.tags ?? ""}]`
                         )
-                      );
+                      ),
+                      el(
+                        "box",
+                        {
+                          flexDirection: "row",
+                          flexWrap: "wrap",
+                          marginTop: 1,
+                        },
+                        createComponent(For, {
+                          get each() {
+                            return splitHighlightedText(
+                              selectedHit()?.entry.fact ?? "",
+                              query()
+                            );
+                          },
+                          children: (seg: { text: string; match: boolean }) =>
+                            el(
+                              "text",
+                              {
+                                fg: () =>
+                                  seg.match
+                                    ? theme().text.action.primary.base
+                                    : theme().text.base,
+                                attributes: () =>
+                                  seg.match ? TextAttributes.BOLD : undefined,
+                              },
+                              seg.text
+                            ),
+                        })
+                      ),
+                      createComponent(Show, {
+                        get when() {
+                          return Boolean(selectedSessionBody());
+                        },
+                        get children() {
+                          return el(
+                            "box",
+                            {
+                              flexDirection: "column",
+                              marginTop: 1,
+                              paddingTop: 1,
+                              border: ["top"],
+                              borderColor: () => theme().border.base,
+                            },
+                            el(
+                              "text",
+                              {
+                                fg: () => theme().text.action.primary.base,
+                                attributes: TextAttributes.BOLD,
+                              },
+                              "◈ FULL SESSION CHECKPOINT MARKDOWN"
+                            ),
+                            el(
+                              "text",
+                              { fg: () => theme().text.muted, wrapMode: "word" },
+                              () => selectedSessionBody()
+                            )
+                          );
+                        },
+                      })
+                    );
+                  },
+                });
+              },
+              get children() {
+                return el(
+                  "box",
+                  { flexDirection: "column", gap: 1, width: "100%" },
+                  // Topic field
+                  el(
+                    "box",
+                    {
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 1,
+                      width: "100%",
+                      onMouseDown: () => setEditorField("topic"),
                     },
-                  })
+                    el(
+                      "text",
+                      {
+                        width: 10,
+                        flexShrink: 0,
+                        fg: () =>
+                          editorField() === "topic"
+                            ? theme().text.action.primary.base
+                            : theme().text.muted,
+                        attributes: () =>
+                          editorField() === "topic" ? TextAttributes.BOLD : undefined,
+                      },
+                      "Topic:"
+                    ),
+                    el(
+                      "box",
+                      { flexGrow: 1, minWidth: 0 },
+                      el("input", {
+                        id: "local-memory-edit-topic",
+                        width: "100%",
+                        value: () => editTopic(),
+                        focused: () => editorMode() !== null && editorField() === "topic",
+                        placeholder: "preferences, decisions, environment, tools...",
+                        placeholderColor: () => theme().text.muted,
+                        textColor: () => theme().text.base,
+                        focusedTextColor: () => theme().text.formfield.focused,
+                        cursorColor: () => theme().text.formfield.focused,
+                        onInput: (v: string) => setEditTopic(v),
+                      })
+                    )
+                  ),
+                  // Tags field
+                  el(
+                    "box",
+                    {
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 1,
+                      width: "100%",
+                      onMouseDown: () => setEditorField("tags"),
+                    },
+                    el(
+                      "text",
+                      {
+                        width: 10,
+                        flexShrink: 0,
+                        fg: () =>
+                          editorField() === "tags"
+                            ? theme().text.action.primary.base
+                            : theme().text.muted,
+                        attributes: () =>
+                          editorField() === "tags" ? TextAttributes.BOLD : undefined,
+                      },
+                      "Tags:"
+                    ),
+                    el(
+                      "box",
+                      { flexGrow: 1, minWidth: 0 },
+                      el("input", {
+                        id: "local-memory-edit-tags",
+                        width: "100%",
+                        value: () => editTags(),
+                        focused: () => editorMode() !== null && editorField() === "tags",
+                        placeholder: "comma-separated keywords...",
+                        placeholderColor: () => theme().text.muted,
+                        textColor: () => theme().text.base,
+                        focusedTextColor: () => theme().text.formfield.focused,
+                        cursorColor: () => theme().text.formfield.focused,
+                        onInput: (v: string) => setEditTags(v),
+                      })
+                    )
+                  ),
+                  // Project field
+                  el(
+                    "box",
+                    {
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 1,
+                      width: "100%",
+                      onMouseDown: () => setEditorField("project"),
+                    },
+                    el(
+                      "text",
+                      {
+                        width: 10,
+                        flexShrink: 0,
+                        fg: () =>
+                          editorField() === "project"
+                            ? theme().text.action.primary.base
+                            : theme().text.muted,
+                        attributes: () =>
+                          editorField() === "project" ? TextAttributes.BOLD : undefined,
+                      },
+                      "Project:"
+                    ),
+                    el(
+                      "box",
+                      { flexGrow: 1, minWidth: 0 },
+                      el("input", {
+                        id: "local-memory-edit-project",
+                        width: "100%",
+                        value: () => editProject(),
+                        focused: () => editorMode() !== null && editorField() === "project",
+                        placeholder: "global (or cms/<client>, git/<repo>)...",
+                        placeholderColor: () => theme().text.muted,
+                        textColor: () => theme().text.base,
+                        focusedTextColor: () => theme().text.formfield.focused,
+                        cursorColor: () => theme().text.formfield.focused,
+                        onInput: (v: string) => setEditProject(v),
+                      })
+                    )
+                  ),
+                  // Core pin toggle
+                  el(
+                    "box",
+                    {
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 1,
+                      width: "100%",
+                      onMouseUp: () => {
+                        setEditorField("core");
+                        setEditCore((v) => !v);
+                      },
+                    },
+                    el(
+                      "text",
+                      {
+                        width: 10,
+                        flexShrink: 0,
+                        fg: () =>
+                          editorField() === "core"
+                            ? theme().text.action.primary.base
+                            : theme().text.muted,
+                        attributes: () =>
+                          editorField() === "core" ? TextAttributes.BOLD : undefined,
+                      },
+                      "Core Pin:"
+                    ),
+                    el(
+                      "text",
+                      {
+                        fg: () =>
+                          editCore()
+                            ? theme().text.action.primary.base
+                            : theme().text.muted,
+                        attributes: () => (editCore() ? TextAttributes.BOLD : undefined),
+                      },
+                      () =>
+                        editCore()
+                          ? "[★ Pinned — injected on every turn] (click or Space to toggle)"
+                          : "[  Unpinned — recalled by relevance] (click or Space to toggle)"
+                    )
+                  ),
+                  // Fact field
+                  el(
+                    "box",
+                    {
+                      flexDirection: "column",
+                      gap: 0,
+                      width: "100%",
+                      marginTop: 1,
+                      onMouseDown: () => setEditorField("fact"),
+                    },
+                    el(
+                      "text",
+                      {
+                        fg: () =>
+                          editorField() === "fact"
+                            ? theme().text.action.primary.base
+                            : theme().text.muted,
+                        attributes: () =>
+                          editorField() === "fact" ? TextAttributes.BOLD : undefined,
+                      },
+                      "Fact (one-line statement):"
+                    ),
+                    el(
+                      "box",
+                      {
+                        width: "100%",
+                        border: true,
+                        borderColor: () =>
+                          editorField() === "fact"
+                            ? theme().text.action.primary.base
+                            : theme().border.base,
+                        paddingX: 1,
+                      },
+                      el("input", {
+                        id: "local-memory-edit-fact",
+                        width: "100%",
+                        value: () => editFact(),
+                        focused: () => editorMode() !== null && editorField() === "fact",
+                        maxLength: Number.POSITIVE_INFINITY,
+                        placeholder: "Write the fact, rule, preference, or decision...",
+                        placeholderColor: () => theme().text.muted,
+                        textColor: () => theme().text.base,
+                        focusedTextColor: () => theme().text.formfield.focused,
+                        cursorColor: () => theme().text.formfield.focused,
+                        onInput: (v: string) => setEditFact(v),
+                      })
+                    )
+                  ),
+                  // Action pills inside editor
+                  el(
+                    "box",
+                    { flexDirection: "row", gap: 1, marginTop: 1 },
+                    Pill({
+                      label: () => (editorMode() === "edit" ? "save changes" : "store memory"),
+                      shortcut: "^s / Enter",
+                      active: () => true,
+                      onClick: () => void saveEditor(),
+                    }),
+                    Pill({
+                      label: () => "cancel",
+                      shortcut: "Esc",
+                      active: () => false,
+                      onClick: cancelEditor,
+                    })
+                  )
                 );
               },
             })

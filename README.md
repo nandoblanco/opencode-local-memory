@@ -1,8 +1,14 @@
 # opencode-local-memory
 
-**Local-first, automatic persistent memory plugin for OpenCode**: recalls relevant facts and session summaries automatically on every turn, stores new decisions and preferences as plain local markdown with local CPU embeddings, checkpoints session compactions automatically, and includes a zero-token `/memory` TUI popup.
+**Local-first, automatic persistent memory plugin for OpenCode**: recalls relevant facts and session summaries on every turn, stores decisions and preferences as local markdown with CPU embeddings, checkpoints session compactions, and provides a zero-token Memory Manager in the TUI and OpenCode Desktop.
 
 ![opencode-local-memory TUI preview](./assets/screenshot.png)
+
+## OpenCode Desktop Support
+
+**Now available in OpenCode Desktop as well as the TUI.** The persistent Memory side panel lets you search stored memories, add and edit facts, pin or unpin core memories, delete entries, import history, and resync the index without a model turn. Press `Ctrl+Shift+M` to open or focus the panel, or `Ctrl+Alt+M` to toggle it. When no session is active, the manager opens in a fallback dialog.
+
+One global OpenCode V2 plugin entry loads the server, TUI, and Desktop integration together. Both interfaces use the same local memory files and index; see [Installation](#installation) for setup.
 
 ## Background
 
@@ -11,7 +17,7 @@ This plugin started as a folder of markdown files and CLI scripts wired together
 `opencode-local-memory` packages that workflow into a self-contained OpenCode plugin:
 
 1. **Human-readable markdown is the source of truth**: Atomic facts live in `topics/*.md` and session summaries live in `sessions/*.md`. You can read, edit, or back them up like any ordinary text files.
-2. **Local CPU embeddings (`vectors.json`)**: Uses `@xenova/transformers` (`Xenova/all-MiniLM-L6-v2`) inside the OpenCode process to embed and search entries on CPU without external servers or API keys.
+2. **Local CPU embeddings (`vectors.json`)**: Uses `@huggingface/transformers` (`Xenova/all-MiniLM-L6-v2`) inside the OpenCode process to embed and search entries on CPU without external servers or API keys.
 3. **Self-contained lifecycle hooks**: The plugin's `context` hook recalls relevant memories for each prompt and injects the storage and recall rules directly into `<local-memory-plugin>`, so you do not need custom `AGENTS.md` instructions.
 4. **Zero-token TUI search & store**: Browse, filter, and add memories directly inside OpenCode via `/memory` and `/memory-add` without making an LLM request.
 
@@ -27,6 +33,8 @@ This plugin started as a folder of markdown files and CLI scripts wired together
 | Interactive `/memory` TUI modal | Wide (`80%` default, configurable via `dialogWidth`) split-pane browser with colored filter pills (`^t` type, `^g` topic, `^r` mode, `^b` import, `^l` resync), instant 0ms lexical filtering refined by local vector similarity, and full session markdown preview |
 | Zero-token history & rule import (`/memory-import`) | Imports existing `AGENTS.md` / `CLAUDE.md` rules into `topics/*.md` and compacted session summaries from `opencode.db` into `sessions/*.md` idempotently via `/memory-import`, `^b` inside `/memory`, or `npx @nandoblanco/opencode-local-memory import` |
 | Automatic first-run bootstrap | On a blank install, automatically creates `~/.config/opencode/memory` (or `$XDG_CONFIG_HOME/opencode/memory`) with `memory.md`, starter `topics/{preferences,decisions,environment,agent-behavior}.md`, and `sessions/README.md` |
+| Interactive fact management | Add and edit topic facts, pin or unpin core entries, and confirm deletion inside the TUI Manager; session checkpoint editing is read-only |
+| OpenCode Desktop Manager | Persistent Memory side panel, query and project filters, fact editor, pin/unpin, delete, import, and resync through `MemoryRpc`; opens a fallback dialog when no session is active |
 
 ## Installation
 
@@ -54,7 +62,7 @@ opencode plugin add github:nandoblanco/opencode-local-memory
 
 ### Option 2: Manual Configuration
 
-Add `@nandoblanco/opencode-local-memory` to `~/.config/opencode/opencode.jsonc` and `~/.config/opencode/cli.json`:
+Add `@nandoblanco/opencode-local-memory` to the global `~/.config/opencode/opencode.jsonc`. OpenCode V2 loads its server, TUI, and Desktop parts from this single entry. The installer also writes `cli.json` for its TUI setup; a separate manual entry there is not required:
 
 ```jsonc
 {
@@ -74,7 +82,7 @@ Add `@nandoblanco/opencode-local-memory` to `~/.config/opencode/opencode.jsonc` 
 
 ### From a Local Directory
 
-Clone this repository, run `npm install`, and run `node ./index.js install` (or reference `"file:///path/to/opencode-local-memory"` in `opencode.jsonc` and `cli.json`):
+For development, use Node.js 26.4 or newer to meet the OpenTUI dependency's declared minimum. Clone this repository, run `npm ci` and `npm run build:gui`, then run `node ./index.js install` or reference the package directory in the global `opencode.jsonc`. The root `overrides` pin patched `glob` and `minimatch` versions for this repository's development dependencies; they do not alter the OpenCode host application's dependencies:
 
 ```json
 {
@@ -113,6 +121,12 @@ Once enabled, the plugin manages memory automatically during normal coding sessi
    }
    ```
 
+### OpenCode Desktop
+
+Run `/memory [query]` or press `Ctrl+Shift+M` (`Cmd+Shift+M` on macOS) to open and focus the persistent Memory side panel. `Ctrl+Alt+M` (`Cmd+Option+M`) toggles the panel. Without an active session, these commands open a dialog instead. Titlebar and vertical-tab shortcuts also open the Manager.
+
+The Desktop commands `/memory-add`, `/memory-delete`, and `/memory-import` call the server RPC methods without a model turn. `/memory-add` without pipe-separated arguments opens the fact editor. Desktop shortcuts are separate from the TUI keybindings below.
+
 ## TUI Query Syntax (`/memory`)
 
 Type filters inline in the search bar or toggle them with clickable filter pills and keyboard shortcuts.
@@ -131,14 +145,18 @@ Type filters inline in the search bar or toggle them with clickable filter pills
 | Key | Action |
 | :--- | :--- |
 | `Enter` | Copy the selected memory entry (`[id] (file): fact`) to the clipboard and close the popup |
-| `Up` / `Down` or `Ctrl+K` / `Ctrl+N` | Move selection up or down (`j`/`k` also work when the Results List pane is focused) |
-| `PageUp` / `PageDown` or `Ctrl+U` / `Ctrl+D` | Jump 6 items up/down (or scroll the right Preview pane by 8 lines when focused) |
+| `Up` / `Down` or `Ctrl+K` / `Ctrl+J` | Move selection up or down (`j`/`k` also work when the Results List pane is focused) |
+| `PageUp` / `PageDown` or `Ctrl+U` / `Ctrl+F` | Jump 6 items up/down (or scroll the right Preview pane by 8 lines when focused) |
 | `Tab` / `Shift+Tab` | Switch focus between Search Input, Results List, and Preview Pane |
 | `Ctrl+T` | Cycle entry type filter pill (`all` -> `topics` -> `sessions`) |
 | `Ctrl+G` | Cycle topic file filter pill (`all` -> `decisions` -> `preferences` -> `environment` -> ...) |
 | `Ctrl+R` | Cycle search mode pill (`hybrid` -> `keyword` -> `regex`) |
 | `Ctrl+B` | Import existing `AGENTS.md` / `CLAUDE.md` rules and compacted `opencode.db` sessions |
 | `Ctrl+L` | Force resync markdown files (`topics/*.md` + `sessions/*.md`) into `vectors.json` |
+| `Ctrl+N` / `Ctrl+E` | Add a fact / edit the selected topic fact |
+| `Ctrl+P` | Pin or unpin the selected topic fact as core |
+| `Ctrl+D` | Request deletion; press again or press `Enter` to confirm |
+| `Ctrl+S` / `Enter` *(in editor)* | Save the fact; `Tab` cycles fields and `Space` toggles the core field |
 | `Esc` | Close popup |
 
 ## How It Works (Architecture & Internals)
@@ -192,14 +210,14 @@ Checkpoint numbers (`-01`, `-02`, ...) auto-increment per `YYYY-MM-DD_<slug>` pr
 `opencode-local-memory` uses `Xenova/all-MiniLM-L6-v2`, a 23 MB sentence-embedding model that converts any sentence into a 384-number vector representing its meaning:
 
 ```js
-const mod = await import("@xenova/transformers");
-const embed = await mod.pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
+const mod = await import("@huggingface/transformers");
+const embed = await mod.pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", { device: "cpu", dtype: "q8" });
 const out = await embed(text, { pooling: "mean", normalize: true });
 const vec = Array.from(out.data); // -> [0.021, -0.084, 0.112, ... 384 numbers]
 ```
 
 - **Semantic vs. keyword matching**: Exact keyword search (`grep`) only matches shared characters. If you store *"Always run backup.ps1 before editing"* and later ask *"how do we undo changes?"*, keyword search returns nothing because no words overlap. The embedding model places both sentences near each other in 384-dimensional space, so their dot product (`dot(queryVec, entry.vector)`) scores high even with zero shared words.
-- **Model installation and local cache**: `@xenova/transformers` is a regular npm dependency in `package.json` that runs ONNX models on CPU inside Node.js or Bun (no Python or external server). On first run, `pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2")` downloads `onnx/model_quantized.onnx` (~23 MB) and `tokenizer.json` from Hugging Face into `node_modules/@xenova/transformers/.cache/Xenova/all-MiniLM-L6-v2/`. Every subsequent run loads the quantized model from local disk in milliseconds, offline.
+- **Model installation and local cache**: `@huggingface/transformers` is a regular npm dependency in `package.json` that runs ONNX models on CPU without Python or an external inference server. The pipeline explicitly selects `device: "cpu"` and `dtype: "q8"`, retaining the same model and 384-dimensional vector format. On first use it downloads and caches the quantized model and tokenizer from Hugging Face. Later runs reuse the local cache. Upgrading from `@xenova/transformers` can require a new model download because the library cache location changes; existing `vectors.json` files are preserved.
 - **Incremental vector sync (`syncVectors`)**: Parses all `topics/*.md` blocks and `sessions/*.md` summaries (with per-file `mtimeMs` caching in `parsedFileCache`) and compares each entry's `id`, `fact`, `tags`, `project`, and `core` against `vectors.json`. Unchanged entries reuse their cached 384-dimensional vectors and serialized JSON lines; only new or modified entries run through the embedding pipeline.
 - **Scoring formula (`searchMemory` & `computeLexicalScore`)**:
    - `semanticScore`: Dot product (cosine similarity on L2-normalized vectors) between the 384-number query vector and each stored entry vector (`0.0` to `1.0`), computed in plain JavaScript in under 2 milliseconds.
@@ -224,6 +242,8 @@ const vec = Array.from(out.data); // -> [0.021, -0.084, 0.112, ... 384 numbers]
 
 ### 7. Agent Tools Registered by the Server Plugin
 
+Desktop uses the separately exported `MemoryRpc` contract in `rpc.js` / `rpc.d.ts`. Server setup registers `query`, `store`, `remove`, `sync`, `importMemory`, and `getSessionMarkdown`; these are RPC methods, not additional LLM tools. `readSessionMarkdown()` restricts previews to paths beneath the memory root that start with `sessions/`. The GUI source (`gui.tsx`, `gui.css`) builds to `dist/gui-experimental.cjs` with `npm run build:gui`.
+
 | Tool Name | Required Inputs | Optional Inputs | Behavior |
 | :--- | :--- | :--- | :--- |
 | `memory_store` | `topic`, `tags`, `fact` | `id`, `supersedes`, `project` (default `global`), `core` (`boolean`) | Creates `topics/<topic>.md` if missing, registers it in `memory.md`, updates in place when `id` exists (or assigns the next `<prefix>-<nnn>` ID), prunes `supersedes` IDs, and updates `vectors.json`. |
@@ -242,7 +262,8 @@ Local embedding, TUI browsing, and direct `/memory-add`, `/memory-delete`, and `
 | History & rule import (`/memory-import`, `Ctrl+B`) | **0 tokens** | Parses `AGENTS.md` / `CLAUDE.md` rules and reads compacted `opencode.db` sessions directly via SQLite and local embeddings |
 | Automatic compaction checkpoint (`compaction` hook) | **0 extra turn tokens** | Captures the existing compaction summary event and indexes it locally into `sessions/*.md` and `vectors.json` |
 | Standalone CLI (`npx @nandoblanco/opencode-local-memory ...`) | **0 tokens** | Runs directly in Node.js outside the model turn |
-| Per-turn auto-recall (`context` hook) & agent tools | **~250-450 system/schema tokens** | Injects compact instructions plus pinned `core` memories and top matching facts (`score >= 0.38`, max `topK = 6`) into `event.system` and registers `memory_store`, `memory_delete`, `memory_search`, and `memory_checkpoint` |
+| Desktop Manager and RPC operations | **0 tokens** | Queries and updates local memory through `MemoryRpc` without a model turn |
+| Per-turn auto-recall (`context` hook) & agent tools | **Variable system/schema and recalled-content tokens** | Injects instructions, pinned `core` memories, and matching facts (`score >= 0.38`, max `topK = 6`); cost grows with their content and the selected model's tokenizer |
 
 ## Directory Structure
 
