@@ -238,9 +238,40 @@ describe("storeMemoryFact, storeSessionCheckpoint, syncVectors, and searchMemory
       };
       await registeredHooks.get("context")(event);
       assert.equal(event.system.length, 1);
-      assert.ok(event.system[0].text.includes("<local-memory-plugin>"));
-      assert.ok(event.system[0].text.includes("AUTOMATIC STORAGE"));
-      assert.ok(event.system[0].text.includes("preferences-001"));
+      const turn1SystemText = event.system[0].text;
+      assert.ok(turn1SystemText.includes("<local-memory-plugin>"));
+      assert.ok(turn1SystemText.includes("AUTOMATIC STORAGE"));
+      assert.ok(turn1SystemText.includes("preferences-001"));
+
+      // Turn 2 with a new follow-up user message + mid-session memory store must keep event.system prefix-stable
+      await storeMemoryFact(tmpDir, {
+        topic: "decisions",
+        tags: "cache, prefix",
+        fact: "Mid-session memory additions must not bust the Turn-1 system prompt prefix cache.",
+      });
+      const turn2Event = {
+        messages: [
+          { role: "user", content: "What is our vanilla JavaScript style preference?" },
+          { role: "assistant", content: "Use terse top-to-bottom vanilla JS." },
+          { role: "user", content: "Now check our prefix cache decision." },
+        ],
+        system: [],
+      };
+      await registeredHooks.get("context")(turn2Event);
+      assert.equal(turn2Event.system.length, 1);
+      assert.equal(turn2Event.system[0].text, turn1SystemText);
+
+      // Post-compression turn where message 0 is replaced by [Compressed conversation section] also stays prefix-stable
+      const compressedEvent = {
+        messages: [
+          { role: "user", content: "[Compressed conversation section]\nSummary of Turn 1 and Turn 2." },
+          { role: "user", content: "fix the issues" },
+        ],
+        system: [],
+      };
+      await registeredHooks.get("context")(compressedEvent);
+      assert.equal(compressedEvent.system.length, 1);
+      assert.equal(compressedEvent.system[0].text, turn1SystemText);
 
       if (typeof dispose === "function") {
         await dispose();

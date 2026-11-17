@@ -1972,27 +1972,39 @@ async function importExistingMemory(rootDir, options) {
   };
 }
 
+function extractUserMessageText(msg) {
+  if (!msg || msg.role !== "user") return "";
+  if (typeof msg.content === "string") return msg.content;
+  if (typeof msg.text === "string") return msg.text;
+  if (Array.isArray(msg.content)) {
+    const textParts = msg.content
+      .filter(function (p) { return p && (p.type === "text" || typeof p.text === "string"); })
+      .map(function (p) { return p.text || ""; });
+    if (textParts.length > 0) return textParts.join(" ");
+  }
+  if (Array.isArray(msg.parts)) {
+    const textParts = msg.parts
+      .filter(function (p) { return p && p.type === "text"; })
+      .map(function (p) { return p.text || ""; });
+    if (textParts.length > 0) return textParts.join(" ");
+  }
+  return "";
+}
+
+function extractFirstUserText(messages) {
+  if (!Array.isArray(messages)) return "";
+  for (let i = 0; i < messages.length; i++) {
+    const text = extractUserMessageText(messages[i]);
+    if (text) return text;
+  }
+  return "";
+}
+
 function extractLastUserText(messages) {
   if (!Array.isArray(messages)) return "";
   for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (!msg) continue;
-    if (msg.role === "user") {
-      if (typeof msg.content === "string") return msg.content;
-      if (typeof msg.text === "string") return msg.text;
-      if (Array.isArray(msg.content)) {
-        const textParts = msg.content
-          .filter(function (p) { return p && (p.type === "text" || typeof p.text === "string"); })
-          .map(function (p) { return p.text || ""; });
-        if (textParts.length > 0) return textParts.join(" ");
-      }
-      if (Array.isArray(msg.parts)) {
-        const textParts = msg.parts
-          .filter(function (p) { return p && p.type === "text"; })
-          .map(function (p) { return p.text || ""; });
-        if (textParts.length > 0) return textParts.join(" ");
-      }
-    }
+    const text = extractUserMessageText(messages[i]);
+    if (text) return text;
   }
   return "";
 }
@@ -2484,13 +2496,36 @@ function createPluginDefinition() {
       }
 
       if (ctx && ctx.session && typeof ctx.session.hook === "function") {
+        const sessionContextCache = new Map();
+        const lastSessionTextByProject = new Map();
         const ctxReg = await ctx.session.hook("context", async function (event) {
           const activeProject = (event && event.directory) || defaultProject || "global";
-          const userText = extractLastUserText(event.messages);
-          const ctxKey = String(userText || "").trim() + "::" + normalizeProjectScope(activeProject) + "::" + cachedVersion;
-          if (ctxKey === lastContextKey && lastContextText) {
+          const projectScope = normalizeProjectScope(activeProject);
+          const sessionId = event && (event.sessionID || event.sessionId || (event.session && event.session.id))
+            ? String(event.sessionID || event.sessionId || event.session.id)
+            : "";
+          const userText = extractFirstUserText(event && event.messages);
+          const trimmedFirst = String(userText || "").trim();
+          const isCompressedHead = trimmedFirst.startsWith("[Compressed conversation section]");
+
+          if (sessionId && sessionContextCache.has(sessionId)) {
             if (Array.isArray(event.system)) {
-              event.system.push({ type: "text", text: lastContextText });
+              event.system.push({ type: "text", text: sessionContextCache.get(sessionId) });
+            }
+            return;
+          }
+
+          if (!sessionId && isCompressedHead && lastSessionTextByProject.has(projectScope)) {
+            if (Array.isArray(event.system)) {
+              event.system.push({ type: "text", text: lastSessionTextByProject.get(projectScope) });
+            }
+            return;
+          }
+
+          const ctxKey = (sessionId || trimmedFirst) + "::" + projectScope;
+          if (sessionContextCache.has(ctxKey)) {
+            if (Array.isArray(event.system)) {
+              event.system.push({ type: "text", text: sessionContextCache.get(ctxKey) });
             }
             return;
           }
@@ -2544,10 +2579,14 @@ function createPluginDefinition() {
           }
 
           lines.push("</local-memory-plugin>");
+          const contextText = lines.join("\n");
+          if (sessionId) sessionContextCache.set(sessionId, contextText);
+          sessionContextCache.set(ctxKey, contextText);
+          lastSessionTextByProject.set(projectScope, contextText);
           lastContextKey = ctxKey;
-          lastContextText = lines.join("\n");
+          lastContextText = contextText;
           if (Array.isArray(event.system)) {
-            event.system.push({ type: "text", text: lastContextText });
+            event.system.push({ type: "text", text: contextText });
           }
         });
         if (ctxReg) registrations.push(ctxReg);
