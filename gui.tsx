@@ -1275,8 +1275,7 @@ export default Plugin.define({
               "group flex h-7 w-full shrink-0 items-center gap-1.5 rounded-[6px] ps-1.5 pe-2 text-[13px] leading-4 text-v2-text-text-faint hover:text-v2-text-text-base";
             vBtn.innerHTML =
               '<svg data-slot="icon-svg" width="16" height="16" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" class="shrink-0" aria-hidden="true"><use href="#opencode-v2-icon-outline-brain"></use></svg>' +
-              '<span class="min-w-0 truncate">Memories</span>' +
-              '<span class="ms-auto hidden min-w-0 truncate text-v2-text-text-faint group-hover:block group-focus-visible:block" aria-hidden="true"><bdi dir="ltr">Ctrl+Shift+M</bdi></span>';
+              '<span class="min-w-0 truncate whitespace-nowrap">Memories</span>';
             vBtn.addEventListener("click", (e) => {
               e.preventDefault();
               e.stopPropagation();

@@ -622,6 +622,13 @@ function parseSessionEntries(rootDir) {
     const base = file.replace(/\.md$/, "");
     const titleMatch = raw.match(/^#\s+(.+)$/m);
     const title = titleMatch ? titleMatch[1].trim() : base;
+    if (
+      title.startsWith("Auto Compaction Checkpoint (") &&
+      raw.includes("Automatic checkpoint captured at session compaction.")
+    ) {
+      parsedFileCache.set(fullPath, { mtimeMs: stat.mtimeMs, entries: [] });
+      continue;
+    }
     const dateMatch = base.match(/^(\d{4}-\d{2}-\d{2})_(.+)$/);
     const date = dateMatch ? dateMatch[1] : "";
     const slug = dateMatch ? dateMatch[2] : base;
@@ -643,12 +650,18 @@ function parseSessionEntries(rootDir) {
       const re = new RegExp("##\\s+" + heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\n([\\s\\S]*?)(?=\\n##\\s+|$)", "i");
       const m = raw.match(re);
       if (m && m[1].trim()) {
-        const cleaned = m[1].trim().replace(/\n+/g, " ").replace(/\s+/g, " ");
-        sections.push(heading + ": " + cleaned);
+        const stripped = m[1]
+          .replace(/^#\s+Session Handoff:[^\n]*\n?/gim, "")
+          .replace(/^-\s+\*\*(?:Date|Previous Session ID|Project|Working Directory|Reason for Handoff)\*\*:[^\n]*\n?/gim, "")
+          .replace(/^#{2,4}\s+/gm, "");
+        const cleaned = stripped.trim().replace(/\n+/g, " ").replace(/\s+/g, " ");
+        if (cleaned) {
+          sections.push(heading + ": " + cleaned);
+        }
       }
     }
 
-    const factText = title + " — " + (sections.join(" | ").slice(0, 700) || raw.replace(/\s+/g, " ").slice(0, 500));
+    const factText = title + " — " + (sections.join(" | ").slice(0, 240) || raw.replace(/\s+/g, " ").slice(0, 240));
     const entry = {
       id: "session:" + base,
       date: date,
@@ -1329,6 +1342,71 @@ async function storeMemoryFact(rootDir, input) {
     updated: wasUpdated,
     superseded: supersededIds
   });
+}
+
+async function maintainMemory(rootDir, options) {
+  const opts = options || {};
+  ensureMemoryLayout(rootDir);
+  const sessionDir = path.join(rootDir, "sessions");
+  const idsToDelete = [];
+
+  if (fs.existsSync(sessionDir)) {
+    const files = fs.readdirSync(sessionDir).filter(function (f) {
+      return f.endsWith(".md") && f.toLowerCase() !== "readme.md";
+    });
+    for (const file of files) {
+      const fullPath = path.join(sessionDir, file);
+      try {
+        const raw = fs.readFileSync(fullPath, "utf8");
+        if (
+          raw.includes("# Auto Compaction Checkpoint (") &&
+          raw.includes("Automatic checkpoint captured at session compaction.")
+        ) {
+          idsToDelete.push("session:" + file.replace(/\.md$/, ""));
+        }
+      } catch {
+        // ignore read error
+      }
+    }
+  }
+
+  const topics = parseTopicEntries(rootDir);
+  const seenByProjectFact = new Map();
+  for (const entry of topics) {
+    if (opts.pruneImportedRules && /\bimported\b/i.test(entry.tags || "")) {
+      idsToDelete.push(entry.id);
+      continue;
+    }
+    const normFact = String(entry.fact || "").toLowerCase().replace(/\s+/g, " ").trim();
+    const normProj = normalizeProjectScope(entry.project || "global");
+    const dedupKey = normProj + "::" + normFact;
+    if (seenByProjectFact.has(dedupKey)) {
+      idsToDelete.push(seenByProjectFact.get(dedupKey));
+    }
+    seenByProjectFact.set(dedupKey, entry.id);
+  }
+
+  let deletedCount = 0;
+  if (idsToDelete.length > 0) {
+    const delRes = await deleteMemoryEntry(rootDir, idsToDelete);
+    deletedCount = delRes.deleted.length;
+  }
+
+  const syncResult = await syncVectors(rootDir);
+  const stampFile = path.join(rootDir, ".last-maintain");
+  try {
+    fs.writeFileSync(stampFile, new Date().toISOString() + "\n", "utf8");
+  } catch {
+    // ignore stamp write error
+  }
+
+  return {
+    deletedCount: deletedCount,
+    deletedIds: idsToDelete,
+    total: syncResult.total,
+    embedded: syncResult.embedded,
+    reused: syncResult.reused
+  };
 }
 
 async function storeSessionCheckpoint(rootDir, input) {
@@ -2534,25 +2612,18 @@ function createPluginDefinition() {
           const lines = [
             "<local-memory-plugin>",
             "Persistent memory (`opencode-local-memory`) is active at: " + rootDir,
-            "Available topics: " + (topicSlugs.join(", ") || "preferences, decisions, environment, agent-behavior") + " (or pass any new topic slug to create a new file).",
+            "Available topics: " + (topicSlugs.join(", ") || "preferences, decisions, environment, agent-behavior") + " (or pass any new topic slug).",
             "",
-            "AUTOMATIC STORAGE (via `memory_store` / `memory_delete` tools — no prompting needed):",
-            "Call `memory_store` immediately in the SAME turn before your final response whenever any of these happen:",
-            "- User states a preference, convention, or 'always/never do X' rule",
-            "- An architecture, workflow, or design decision is made (yours or theirs)",
-            "- A non-obvious environment, path, port, or tooling fact is discovered",
-            "- A recurring correction or pattern emerges",
-            "- The user has to correct you or repeat an instruction (store it so it never needs repeating)",
-            "- When replacing an outdated fact, pass `id` to update in-place or `supersedes: '<old-id>'` (or call `memory_delete`) so stale facts never pollute recall.",
-            "Hard gate: before finishing every task, check if any trigger above fired. If it did, call `memory_store` NOW — never promise to remember later. Do NOT store trivial exchanges, transient debugging steps, duplicates, or secrets.",
+            "AUTOMATIC STORAGE (via `memory_store` / `memory_delete` — no prompting needed):",
+            "Before your final response, call `memory_store` in the SAME turn whenever: (1) user states a preference/convention/rule, (2) an architecture or workflow decision is made, (3) a non-obvious environment/path/port/tooling fact is found, or (4) the user corrects you. Pass `id` or `supersedes` (or `memory_delete`) when replacing outdated facts. Never store trivial exchanges, transient debugging steps, duplicates of AGENTS.md, or secrets.",
             "",
             "WHERE TO STORE:",
-            "- Global (`memory_store` with default `project: 'global'`): coding style, tooling preferences, agent behavior rules, cross-project decisions, and environment facts that remain true in a new project tomorrow. Pass `core: true` for critical invariants that must be pinned on every turn.",
-            "- Project-scoped (`memory_store` with `project: '<repo-or-path>'` or `AGENTS.md` in repo root): project-specific architecture, asset IDs, endpoints, or conventions that only apply to that project.",
+            "- Global (`project: 'global'`): cross-project coding style, tooling preferences, agent behavior, and environment facts. Pass `core: true` only for critical invariants that are NOT already in AGENTS.md.",
+            "- Project-scoped (`project: '<repo-or-path>'`): project-specific architecture, asset IDs, endpoints, or conventions.",
             "",
             "AUTOMATIC RECALL & CHECKPOINTS:",
-            "- When the user references 'we discussed', 'last time', 'earlier', a settled decision, or when a topic needs deeper lookup than the auto-recalled hits below, call `memory_search` (`mode: 'hybrid' | 'semantic' | 'grep'`).",
-            "- Session compactions are checkpointed automatically. At the end of significant work sessions (architecture decisions, hard-won fixes, new patterns), call `memory_checkpoint` with `slug`, `title`, and a distilled `summary`."
+            "- Call `memory_search` (`mode: 'hybrid' | 'semantic' | 'grep'`) when the user references past work or deeper recall is needed.",
+            "- At the end of significant work sessions, call `memory_checkpoint` with `slug`, `title`, and a distilled `summary`."
           ];
 
           const coreMemories = getCoreMemories(rootDir, activeProject, userText);
@@ -2566,10 +2637,17 @@ function createPluginDefinition() {
           }
 
           if (userText && userText.trim().length >= 5) {
-            const hits = await searchMemory(rootDir, userText, "hybrid", topK, { project: activeProject }).catch(function () { return []; });
-            const relevant = hits.filter(function (h) {
-              return h.score >= minScore && !coreIds.has(h.entry.id);
-            });
+            const hits = await searchMemory(rootDir, userText, "hybrid", Math.max(topK * 2, 10), { project: activeProject }).catch(function () { return []; });
+            const relevant = [];
+            let sessionCount = 0;
+            for (const h of hits) {
+              if (h.score < minScore || coreIds.has(h.entry.id)) continue;
+              const isSession = String(h.entry.id || "").startsWith("session:");
+              if (isSession && sessionCount >= 2) continue;
+              if (isSession) sessionCount++;
+              relevant.push(h);
+              if (relevant.length >= topK) break;
+            }
             if (relevant.length > 0) {
               lines.push("Auto-recalled memories for this prompt:");
               for (const h of relevant) {
@@ -2592,6 +2670,10 @@ function createPluginDefinition() {
         if (ctxReg) registrations.push(ctxReg);
 
         const compReg = await ctx.session.hook("compaction", async function (event) {
+          const explicitSummary = event && typeof event.summary === "string" ? event.summary.trim() : "";
+          if (explicitSummary.length < 40) {
+            return;
+          }
           const lastText = extractLastUserText(event.messages);
           const slug = lastText
             ? lastText.toLowerCase().replace(/[^a-z0-9\s]/g, "").trim().split(/\s+/).slice(0, 4).join("-") || "compaction"
@@ -2599,14 +2681,30 @@ function createPluginDefinition() {
           const projectDir = (ctx.location && ctx.location.directory) ? ctx.location.directory : "global";
           await storeSessionCheckpoint(rootDir, {
             slug: slug,
-            title: "Auto Compaction Checkpoint (" + slug + ")",
+            title: "Compaction Checkpoint (" + slug + ")",
             project: projectDir,
-            summary: "## What was built/fixed/decided\n\nAutomatic checkpoint captured at session compaction.\n\n## Last active prompt\n\n" + (lastText || "N/A")
+            summary: "## What was built/fixed/decided\n\n" + explicitSummary
           }).catch(function (err) {
             console.error("local-memory compaction checkpoint error:", err);
           });
         });
         if (compReg) registrations.push(compReg);
+      }
+
+      const stampFile = path.join(rootDir, ".last-maintain");
+      let shouldMaintain = true;
+      try {
+        if (fs.existsSync(stampFile)) {
+          const ageMs = Date.now() - fs.statSync(stampFile).mtimeMs;
+          shouldMaintain = ageMs > 24 * 60 * 60 * 1000;
+        }
+      } catch {
+        shouldMaintain = false;
+      }
+      if (shouldMaintain && !(options && options.skipAutoMaintain)) {
+        Promise.resolve().then(function () {
+          return maintainMemory(rootDir);
+        }).catch(function () {});
       }
 
       return async function () {
@@ -2648,6 +2746,7 @@ export {
   searchMemory,
   storeMemoryFact,
   deleteMemoryEntry,
+  maintainMemory,
   storeSessionCheckpoint,
   readSessionMarkdown,
   executeMemoryQuery
@@ -2771,6 +2870,14 @@ if (isDirectRun) {
       console.log("Deleted " + res.deleted.length + " entries; remaining: " + res.total);
     }).catch(function (err) {
       console.error("Delete failed:", err);
+      process.exit(1);
+    });
+  } else if (cmd === "maintain" || cmd === "clean") {
+    const pruneImported = process.argv.includes("--prune-imported");
+    maintainMemory(rootDir, { pruneImportedRules: pruneImported }).then(function (res) {
+      console.log("Memory maintenance complete: removed " + res.deletedCount + " duplicate/stub entries; " + res.total + " active entries synced.");
+    }).catch(function (err) {
+      console.error("Maintain failed:", err);
       process.exit(1);
     });
   }

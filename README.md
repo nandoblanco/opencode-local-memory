@@ -315,6 +315,9 @@ npx @nandoblanco/opencode-local-memory store decisions "arch, api" "Use REST end
 
 # Delete one or more entries by ID (or comma-separated IDs)
 npx @nandoblanco/opencode-local-memory delete dec-002
+
+# Deduplicate topic facts, prune auto-compaction stub files, and resync vectors.json
+npx @nandoblanco/opencode-local-memory maintain [--dir /path/to/memory] [--prune-imported]
 ```
 
 ## Configuration Options
