@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 (2026-11-17)
 
 - Removed the trailing keyboard shortcut badge (`Ctrl+Shift+M`) from the left sidebar `vertical-tabs-memories` button and added `whitespace-nowrap` so sidebar button labels do not wrap (`gui.tsx`).
 - Kept the `<local-memory-plugin>` system block constant per session in the `context` hook to preserve prompt cache hits across turns.
